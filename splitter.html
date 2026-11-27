@@ -114,7 +114,7 @@ select{min-height:44px;font:inherit;font-size:16px;border:2px solid var(--line);
 <!-- ============ 拆分 ============ -->
 <section id="pSplit">
   <h2><span class="step">1</span>选一份 PDF</h2>
-  <p class="muted" style="margin:0 0 8px">手册、通告、通知、通函、其他文件都可以拆。</p>
+  <p class="muted" style="margin:0 0 8px">手册、通告、通知、通函、其他文件都可以拆。按可读大段切分，方便关键词钉住整段（不是碎句）。</p>
   <div class="row">
     <label class="btn primary" for="pdfFile">选择文件</label>
     <input id="pdfFile" type="file" accept="application/pdf,.pdf" hidden>
@@ -304,8 +304,40 @@ function stripTokens(t, toks){
   return t.trim();
 }
 
+/* 同小节内把过碎正文合成可读段落：关键词要能钉住一整段，而不是碎句 */
+function coalesceChunks(chunks, userOpt){
+  var opt=Object.assign({minKeep:56, target:360, hardMax:1600}, userOpt||{});
+  var out=[], i=0;
+  while(i<(chunks||[]).length){
+    var c=chunks[i];
+    if(!c || c.k!=='p' || c.b){ if(c) out.push(c); i++; continue; }
+    var acc=Object.assign({}, c), j=i+1;
+    while(j<chunks.length){
+      var n=chunks[j];
+      if(!n || n.k!=='p' || n.b) break;
+      if((n.ch||'')!==(acc.ch||'') || (n.sec||'')!==(acc.sec||'') || (n.sub||'')!==(acc.sub||'')) break;
+      if(n.pg!=null && acc.pg!=null && n.pg>acc.pg+1) break;
+      var al=(acc.t||'').length, nl=(n.t||'').length;
+      if(al+nl>opt.hardMax) break;
+      var curEnd=/(?:[。！？]|[.!?])\s*$/.test(acc.t||'');
+      if(al>=opt.target && curEnd) break;
+      if(al>=opt.target && nl>=opt.minKeep && curEnd) break;
+      acc.t=joinText(acc.t, n.t);
+      if(n.ld && !acc.ld) acc.ld=n.ld;
+      if(n.pg!=null) acc.pg=n.pg;
+      if(n.pl) acc.pl=n.pl;
+      j++;
+    }
+    out.push(acc);
+    i=j;
+  }
+  out.forEach(function(c,idx){ c.n=idx; });
+  return out;
+}
+
 function buildChunks(pages, userOpt){
-  var opt=Object.assign({top:null,bottom:null,extra:[],maxLen:420,pieceLen:300}, userOpt||{});
+  /* 偏大段：给人用关键词锁定段落，不追求碎句切片 */
+  var opt=Object.assign({top:null,bottom:null,extra:[],maxLen:1400,pieceLen:900}, userOpt||{});
   var n=pages.length;
   /* 1) 找水印：短的、含英文字母、整本里反复出现的文字块 */
   var cnt=new Map(), pgs=new Map();
@@ -408,7 +440,10 @@ function buildChunks(pages, userOpt){
     var shortLine=L.x1 < rightM-2*Math.max(L.h,medH);
     var nxt=flat[q+1];
     var wrapTok=nxt && !nxt.tb && nxt.page===L.page && /^[A-Za-z0-9]/.test(nxt.t) && !/[。！？；：”"]$/.test(text);
-    if(big || (shortLine && !/[，、]$/.test(text) && !wrapTok)) flush();
+    var endSent=/[。！？；.!?;:：]$/.test(text);
+    var nextNew=nxt && (BULLET_RE.test(nxt.t) || NUM_ITEM_RE.test(nxt.t) || DLG_RE.test(nxt.t) || !!parseHeading(nxt.t));
+    /* 版心短行不再一律切段：只在句末或下一段明显新起时切，避免碎成关键词钉不住的短句 */
+    if(big || (shortLine && endSent && !/[，、]$/.test(text) && !wrapTok) || (shortLine && nextNew && !/[，、]$/.test(text) && !wrapTok)) flush();
   }
   flush(); if(tbl){ push('tb',tbl.rows.join('\n'),tbl.page,tbl.pl); tbl=null; } closeHead(0);
   /* 7) 流程图：连续 3 个以上居中的短句，合成一条 */
@@ -424,7 +459,7 @@ function buildChunks(pages, userOpt){
     }
     merged.push(c0); a++;
   }
-  /* 8) 太长的段落按句号切开 */
+  /* 8) 过长段落按句号切开（阈值抬高，尽量保留整段） */
   var out=[];
   merged.forEach(function(c){
     delete c.cx;
@@ -434,7 +469,8 @@ function buildChunks(pages, userOpt){
       if(buf) out.push(Object.assign({},c,{t:buf}));
     } else out.push(c);
   });
-  out.forEach(function(c,i){ c.n=i; });
+  /* 9) 再合并残留碎段，让关键词更容易钉住同一段 */
+  out=coalesceChunks(out);
   stats.chunks=out.length;
   return {chunks:out, stats:stats};
 }
@@ -764,7 +800,7 @@ $('goBtn').onclick=async function(){
     var r=buildChunks(pages,{top:top, bottom:bot, extra:extra});
     var name=($('mName').value||FILE.name.replace(/\.pdf$/i,'')).trim();
     r.chunks.forEach(function(c){ ['ch','chT','sec','secT','sub','subT','pl','ld'].forEach(function(p){ if(c[p]==='') delete c[p]; }); });
-    var json='{"format":1,"name":'+JSON.stringify(name)+',"source":'+JSON.stringify(FILE.name)+',"built":"'+new Date().toISOString().slice(0,10)+'","pages":'+r.stats.pages+',"chunks":[\n'+r.chunks.map(function(c){return JSON.stringify(c);}).join(',\n')+'\n]}';
+    var json='{"format":2,"coalesce":1,"name":'+JSON.stringify(name)+',"source":'+JSON.stringify(FILE.name)+',"built":"'+new Date().toISOString().slice(0,10)+'","pages":'+r.stats.pages+',"chunks":[\n'+r.chunks.map(function(c){return JSON.stringify(c);}).join(',\n')+'\n]}';
     LAST={name:name, json:json, fname:name.replace(/[\\\/:*?"<>|]/g,'_')+'.manual.json'};
     addToDB(name, JSON.parse(json).chunks);
     showResult(r, json);
