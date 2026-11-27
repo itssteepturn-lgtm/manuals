@@ -1,7 +1,7 @@
 /* 只缓存页面本身（让没网时也能打开）。手册数据另外存在本机数据库里。 */
-/* pages-redeploy: 2026-11-27T09:18Z after deploy 502 */
-var V='manuals-shell-v3';
-self.addEventListener('install',function(e){ e.waitUntil(caches.open(V).then(function(c){ return c.addAll(['./','./index.html']); }).then(function(){ return self.skipWaiting(); })); });
+/* shell-v4: persistent lexicon + unified split tab + CLR/TOC ranking */
+var V='manuals-shell-v4';
+self.addEventListener('install',function(e){ e.waitUntil(caches.open(V).then(function(c){ return c.addAll(['./','./index.html','./splitter.html']); }).then(function(){ return self.skipWaiting(); })); });
 self.addEventListener('activate',function(e){ e.waitUntil(caches.keys().then(function(ks){ return Promise.all(ks.filter(function(k){ return k!==V; }).map(function(k){ return caches.delete(k); })); }).then(function(){ return self.clients.claim(); })); });
 self.addEventListener('fetch',function(e){
   var r=e.request, u=new URL(r.url);

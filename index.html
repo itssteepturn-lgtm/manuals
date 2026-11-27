@@ -55,7 +55,7 @@ summary{min-height:48px;display:flex;align-items:center;font-weight:700;cursor:p
 .toc .cnt{margin-left:auto;white-space:nowrap;color:var(--muted);font-size:14px}
 .toc li.empty .cnt{color:var(--warn);font-weight:700}
 .sign{display:inline-block;background:var(--sign);color:var(--signfg);border:2px solid var(--signfg);border-radius:3px;font-weight:800;padding:0 7px;line-height:1.35;font-size:.9em;white-space:nowrap}
-.sbox{display:flex;gap:8px;margin:10px 0 6px;position:sticky;top:calc(env(safe-area-inset-top) + 56px);z-index:4;background:var(--bg);padding:6px 0}
+.sbox{display:flex;gap:8px;margin:10px 0 6px;position:sticky;top:calc(env(safe-area-inset-top) + 98px);z-index:4;background:var(--bg);padding:6px 0}
 .sbox input{flex:1;font-size:19px}
 .sbox .btn{min-width:84px}
 .btn.rec{background:var(--warn);color:#fff;border-color:var(--warn)}
@@ -105,11 +105,21 @@ select{min-height:44px;font:inherit;font-size:16px;border:2px solid var(--line);
 .mlist{margin:6px 0;font-size:15px}
 .mlist div{padding:6px 0;border-bottom:1px solid var(--line)}
 a{color:var(--fg)}
+.split-frame{width:100%;min-height:calc(100vh - 120px);border:0;background:var(--bg);display:block}
+.brandrow{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:12px 0 8px}
+.brandrow .brand{padding:0}
 </style>
 </head>
 <body>
-<header class="top"><div class="brand">手册速查<span id="status" class="stat"></span></div></header>
+<header class="top">
+  <div class="brandrow"><div class="brand">手册速查<span id="status" class="stat"></span></div></div>
+  <nav class="tabs">
+    <button id="tabSearch" class="on" type="button">速查</button>
+    <button id="tabSplit" type="button">拆分</button>
+  </nav>
+</header>
 <main>
+<section id="pSearch">
   <div class="sbox">
     <input id="q" type="search" placeholder="输入问题，回车确认" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false">
     <button id="mic" class="btn" type="button">开始聆听</button>
@@ -133,14 +143,19 @@ a{color:var(--fg)}
       <input id="jsonFile" type="file" accept=".json,application/json" multiple hidden>
       <button id="clrCache" class="btn" type="button">清除本机缓存</button>
     </div>
-    <p class="muted">手册第一次从仓库下载后存在本机，之后没网也能用；有网时每次打开会自动检查更新。拆分手册请去 <a href="./splitter.html">拆分页</a>。</p>
+    <p class="muted">本机 IndexedDB 优先：拆分后直接写入本机并可离线速查；仓库里的 *.manual.json 作备份/分发，打开时检查更新。同名手册再拆会替换旧副本；术语表持久保存，只并入新词。</p>
     <h2>停顿多久合并关键词并搜索</h2>
     <p class="muted">边说边听：停顿不够长时，关键词会攒在一起，合并成一次查询再找最相关的章节。</p>
     <select id="gap"><option value="2500">2.5 秒</option><option value="4000" selected>4 秒</option><option value="6000">6 秒</option></select>
     <h2>纠错词表</h2>
-    <p class="muted">总是听错的词，一行写一条：听成的词 = 正确的词。例如：伊卡姆 = ECAM。手册载入后还会自动用语料里的专业词（绿系统、绿液压等）做同音纠错。</p>
+    <p class="muted">总是听错的词，一行写一条：听成的词 = 正确的词。例如：伊卡姆 = ECAM。另有本机持久术语表（跨手册并集）做同音纠错。</p>
     <textarea id="corr" spellcheck="false" autocapitalize="off" placeholder="伊卡姆 = ECAM"></textarea>
   </details>
+</section>
+<section id="pSplit" hidden>
+  <p class="muted" style="margin:10px 0 6px">拆完自动写入本机缓存并并入术语表；需要备份时可在下方下载 JSON 上传到仓库。</p>
+  <iframe id="splitFrame" class="split-frame" title="手册拆分" src="./splitter.html?embed=1"></iframe>
+</section>
 </main>
 <script>
 /* ===== CORE：纯函数，不碰网页元素，可单独测试 ===== */
@@ -450,14 +465,21 @@ function prepChunk(c, name){
 }
 
 /* 模糊索引：三个字里错一个字，也能对上手册里的词（错的那个字要同音，或候选很少） */
-var FZ=null, SI=null, LEX=null;
+var FZ=null, SI=null, LEX=null, LEX_STORE=null;
+var LEX_KEY='__lexicon__';
 function secKeyOf(c){ return c.m+'|'+(c.ch||'')+'|'+(c.sec||'_'); }
 function buildSecIdx(db){
-  var m=new Map();
-  db.forEach(function(c){ var k=secKeyOf(c), st=m.get(k); if(!st){ st=new Set(); m.set(k,st); } c._kb.forEach(function(t){ st.add(t); }); c._kt.forEach(function(t){ st.add(t); }); });
-  SI={m:m,n:db.length};
+  var m=new Map(), sz=new Map();
+  db.forEach(function(c){
+    var k=secKeyOf(c), st=m.get(k);
+    if(!st){ st=new Set(); m.set(k,st); sz.set(k,0); }
+    sz.set(k,(sz.get(k)||0)+1);
+    c._kb.forEach(function(t){ st.add(t); }); c._kt.forEach(function(t){ st.add(t); });
+  });
+  SI={m:m,sz:sz,n:db.length};
 }
-function invalidateIndexes(){ FZ=null; SI=null; LEX=null; }
+/* 模糊/章节索引随手册变；持久术语表单独维护，不在这里清掉 */
+function invalidateIndexes(){ FZ=null; SI=null; }
 function fzAdd(m,k,ch){ var v=m.get(k); if(v===undefined) m.set(k,ch); else if(v.indexOf(ch)<0) m.set(k,v+ch); }
 function buildFuzzy(db){
   var T3=new Set(), mc=new Map(), mb=new Map(), ma=new Map(), V2=new Set(), b1=new Map(), b2=new Map();
@@ -509,6 +531,23 @@ function fuzzyPairs(q, db){
 /* ===== 手册术语表：从标题/正文抽专业词，用来把听写错词纠回真词 ===== */
 var TECH_SFX=/(?:系统|液压|空速|发电机|起落架|襟翼|缝翼|刹车|燃油|驾驶舱|指示|程序|活门|阀门|警告|高度|速度|压力|温度|模式|电门|组件|环路|油箱|泵|活门|刻度|翼尖|自动驾驶|推力|汇流条)/;
 var LEX_BAD=/^(?:可以|如果|或者|以及|进行|一个|这个|那个|时候|之后|之前|根据|由于|通过|对于|下页|接下|如下|以上|以下|同时|已经|可能|应当|应该|不要|不是|没有|所有|任何|其他|其中|然后|但是|因为|所以|只是|还是|或者|并且)/;
+/* 已知听写错词：优先硬纠正，再跑自动术语表。自动词表继续从手册抽，不必另建整本词典。 */
+var ASR_HARD=[
+  ['不可厚重','不可靠空速'],['不可厚中','不可靠空速'],['不可好重','不可靠空速'],
+  ['氯系统','绿系统'],['氯液压','绿液压'],['绿叶要','绿液压'],['绿液要','绿液压'],['绿叶压','绿液压'],
+  ['黄叶压','黄液压'],['蓝叶压','蓝液压']
+];
+var LEX_SEEDS=['不可靠空速','空速不可靠','空速指示不可靠','绿液压系统','绿液压','绿系统','黄液压系统','黄液压','黄系统','蓝液压系统','蓝液压','蓝系统','备用速度刻度','液压系统','不可靠指示'];
+function applyAsrHard(q){
+  var fixes=[], i, a, b;
+  for(i=0;i<ASR_HARD.length;i++){
+    a=ASR_HARD[i][0]; b=ASR_HARD[i][1];
+    if(!a||!b||q.indexOf(a)<0) continue;
+    q=q.split(a).join(b);
+    fixes.push({from:a,to:b,near:b==='不可靠空速'?['空速不可靠','空速指示不可靠']:(b==='绿系统'?['绿液压','绿液压系统']:(b==='绿液压'?['绿系统','绿液压系统']:[]))});
+  }
+  return {q:q, fixes:fixes};
+}
 function lexAdd(df, term, w){
   if(!term || term.length<2 || term.length>10) return;
   if(LEX_BAD.test(term)) return;
@@ -517,10 +556,11 @@ function lexAdd(df, term, w){
   if(!/^[\u3400-\u9fff]+$/.test(term)) return;
   df.set(term, (df.get(term)||0)+w);
 }
-function buildLexicon(db){
+/* 从一批 chunks 抽术语（尽量全）；持久库做并集，不因重拆而丢掉跨手册共享词 */
+function extractLexFromChunks(chunks){
   var df=new Map(), titled=new Set(), i, t, runs, r, n, j, s, m;
-  for(i=0;i<db.length;i++){
-    var c=db[i];
+  for(i=0;i<(chunks||[]).length;i++){
+    var c=chunks[i];
     [c.chT,c.secT,c.subT].forEach(function(title){
       if(!title) return;
       (title.match(/[\u3400-\u9fff]{2,10}/g)||[]).forEach(function(x){ lexAdd(df,x,8); titled.add(x); });
@@ -537,11 +577,9 @@ function buildLexicon(db){
       for(n=Math.min(8,s.length);n>=3;n--){
         for(j=0;j+n<=s.length;j++){
           var g=s.slice(j,j+n);
-          /* 只收带专业后缀的短语，避免“不可靠测”这类碎窗污染词表 */
           if(TECH_SFX.test(g)) lexAdd(df,g,2);
         }
       }
-      /* 含“不可靠”且带空速/指示等实词的窗口才收，避免“不可靠值”碎词 */
       for(n=Math.min(8,s.length);n>=4;n--){
         for(j=0;j+n<=s.length;j++){
           var g2=s.slice(j,j+n);
@@ -550,7 +588,6 @@ function buildLexicon(db){
       }
     }
   }
-  /* 空速不可靠 ↔ 不可靠空速 这类词序也对上口语 */
   Array.from(df.keys()).forEach(function(term){
     var k=term.indexOf('不可靠');
     if(k>0 && term.length<=8){
@@ -560,21 +597,75 @@ function buildLexicon(db){
     if(term.indexOf('空速')>=0 && term.indexOf('不可靠')>=0) titled.add(term);
     if(term.length>=4 && /不可靠$/.test(term)) titled.add(term);
   });
-  /* 口头常说的短专业词，即使正文里词序不同也收进词表 */
-  ['不可靠空速','空速不可靠','绿液压系统','绿液压','绿系统','黄系统','蓝系统','备用速度刻度'].forEach(function(x){ titled.add(x); lexAdd(df,x,Math.max(24,df.get(x)||0)); });
-  var minW=db.length>20000?6:3, terms=[], by0=new Map();
-  df.forEach(function(w,term){
-    if(w<minW && !titled.has(term)) return;
-    if(term.length===2 && w<minW*3 && !titled.has(term)) return;
-    terms.push(term);
-    var ch=term.charAt(0), arr=by0.get(ch); if(!arr){ arr=[]; by0.set(ch,arr); } arr.push(term);
+  return {df:df, titled:titled};
+}
+function emptyLexStore(){ return {v:2, df:{}, titled:{}, sources:{}, updated:null, termCount:0}; }
+function materializeLex(store){
+  var df=new Map(), titled=new Set(), terms=[], by0=new Map(), term, w;
+  LEX_SEEDS.forEach(function(x){ titled.add(x); df.set(x, Math.max(28, (store.df&&store.df[x])||0)); });
+  if(store&&store.df) for(term in store.df) if(Object.prototype.hasOwnProperty.call(store.df,term)){
+    w=store.df[term]||0; df.set(term, Math.max(df.get(term)||0, w));
+  }
+  if(store&&store.titled) for(term in store.titled) if(Object.prototype.hasOwnProperty.call(store.titled,term)) titled.add(term);
+  df.forEach(function(weight, t){
+    /* 持久库尽量保留；运行时仍丢掉极弱碎词 */
+    if(weight<2 && !titled.has(t)) return;
+    if(t.length===2 && weight<4 && !titled.has(t)) return;
+    terms.push(t);
+    var ch=t.charAt(0), arr=by0.get(ch); if(!arr){ arr=[]; by0.set(ch,arr); } arr.push(t);
   });
-  terms.sort(function(a,b){ return b.length-a.length||(df.get(b)-df.get(a)); });
-  by0.forEach(function(arr){ arr.sort(function(a,b){ return b.length-a.length||(df.get(b)-df.get(a)); }); });
-  LEX={terms:terms, by0:by0, df:df, n:db.length};
+  terms.sort(function(a,b){ return b.length-a.length||((df.get(b)||0)-(df.get(a)||0)); });
+  by0.forEach(function(arr){ arr.sort(function(a,b){ return b.length-a.length||((df.get(b)||0)-(df.get(a)||0)); }); });
+  LEX={terms:terms, by0:by0, df:df, n:terms.length, store:store};
   return LEX;
 }
-function ensureLex(db){ if(!LEX || LEX.n!==db.length) buildLexicon(db); return LEX; }
+function mergeExtractIntoStore(store, name, extracted){
+  store=store||emptyLexStore();
+  if(!store.df) store.df={}; if(!store.titled) store.titled={}; if(!store.sources) store.sources={};
+  var added=0;
+  extracted.df.forEach(function(w,term){
+    var prev=store.df[term]||0;
+    if(!prev) added++;
+    /* 并集：权重取更大的；重拆同一本也只抬高、不删旧词 */
+    store.df[term]=Math.max(prev, w);
+  });
+  extracted.titled.forEach(function(term){ store.titled[term]=1; });
+  LEX_SEEDS.forEach(function(x){ store.titled[x]=1; store.df[x]=Math.max(28, store.df[x]||0); });
+  if(name) store.sources[name]=1;
+  store.termCount=Object.keys(store.df).length;
+  store.updated=new Date().toISOString();
+  store.v=2;
+  return {store:store, added:added};
+}
+async function loadLexStore(){
+  var all=await idbAll(), i, hit=null;
+  for(i=0;i<all.length;i++) if(all[i].key===LEX_KEY){ hit=all[i].val; break; }
+  LEX_STORE=hit&&hit.df ? hit : emptyLexStore();
+  materializeLex(LEX_STORE);
+  return LEX_STORE;
+}
+async function saveLexStore(store){
+  LEX_STORE=store||LEX_STORE||emptyLexStore();
+  materializeLex(LEX_STORE);
+  await idbPut(LEX_KEY, LEX_STORE);
+  return LEX_STORE;
+}
+/* 把一本手册的术语并入持久词表（已收录过的手册名仍会再合并新词，不整表重建） */
+async function mergeLexiconFromManual(name, chunks){
+  var extracted=extractLexFromChunks(chunks);
+  var r=mergeExtractIntoStore(LEX_STORE||emptyLexStore(), name, extracted);
+  await saveLexStore(r.store);
+  return r;
+}
+/* 兼容旧调用：有持久库就物化；没有才从当前 DB 抽一次打底 */
+function buildLexicon(db){
+  if(LEX_STORE && LEX_STORE.df && Object.keys(LEX_STORE.df).length) return materializeLex(LEX_STORE);
+  var extracted=extractLexFromChunks(db||[]);
+  var r=mergeExtractIntoStore(emptyLexStore(), null, extracted);
+  LEX_STORE=r.store;
+  return materializeLex(LEX_STORE);
+}
+function ensureLex(db){ if(!LEX) buildLexicon(db); return LEX; }
 function phoneDist(a,b){
   if(a===b) return 0; homoInit();
   var x=HOMO.get(a), y=HOMO.get(b); if(!x||!y) return 1.15;
@@ -622,7 +713,7 @@ function lexIsTech(t){
   if(t==='不可靠') return true;
   return t.indexOf('不可靠')>=0 && /空速|指示|速度|系统|程序|飞行/.test(t);
 }
-function lexSeeded(t){ return /^(?:不可靠空速|空速不可靠|绿液压系统|绿液压|绿系统|黄系统|蓝系统|备用速度刻度)$/.test(t||''); }
+function lexSeeded(t){ return !!t && LEX_SEEDS.indexOf(t)>=0; }
 function lexBetter(a, b, sub){
   if(!b) return a; if(!a) return b;
   var ta=lexIsTech(a.to), tb=lexIsTech(b.to);
@@ -694,29 +785,66 @@ function lexCorrect(q, db){
   return {q:out, fixes:fixes};
 }
 function mergeLexFixes(into, more){ (more||[]).forEach(function(f){ if(!f||!f.from||!f.to||f.from===f.to) return; for(var i=0;i<into.length;i++) if(into[i].from===f.from&&into[i].to===f.to) return; into.push(f); }); }
-/* 目录行、有效页清单、规章编号串：不是飞行员要读的正文 */
+/* 目录行、有效页清单、规章编号串、点线 TOC：不是飞行员要读的正文 */
+function isTocNoise(t){
+  t=t||'';
+  if(/^接上页/.test(t)) return true;
+  if(/\.{6,}|…{3,}|·{6,}|_{6,}/.test(t)) return true;
+  var dots=(t.match(/[.\u2026·]/g)||[]).length;
+  if(dots>=10 && dots/Math.max(1,t.length)>0.22) return true;
+  return false;
+}
 function isRefChunk(c){
   if(!c) return false;
   var t=c.t||'';
+  if(isTocNoise(t)) return true;
   if(/EASA|CS-\d|AMC\s|GM\s|EU-OPS|JAR-/.test(t) && t.length<220) return true;
   if(c.k==='tb' && /(?:DSC|PRO|LIM|NOR|ABN|SUP|PLP|GEN)-[A-Z0-9]/.test(t) && (t.match(/\|/g)||[]).length>=2) return true;
   if(/^(?:[A-Z]{2,5}-[A-Z0-9./]+(?:\s*[|｜]\s*[^\n]{0,40}){1,3}\s*)+$/m.test(t) && t.length<260) return true;
   return false;
 }
+/* 真·CLR/ECAM 操作短句降权。注意：拆坏的章标题会粘到上万段上，不能单凭 chT 判噪声。 */
+function isProcUiNoise(c, P){
+  if(!c) return false;
+  var q=(P&&P.qn)||'';
+  var aboutClr=/clr|清除按钮|按压clr|ecam控制/i.test(q) || /CLR|清除/.test(q);
+  var t=(c.t||'').trim(), body=t+' '+(c.ld||'');
+  if(aboutClr) return false;
+  if(/液压|空速不可靠|绿系统|黄系统|蓝系统|BUSS|备用速度|油箱|液压泵|不可靠/.test(body)) return false;
+  if(/按压CLR|CLR按钮|按压.*CLR|EO\.\s*CLR|E\/WD显示先前通过CLR/.test(body)) return true;
+  if(t.length>0 && t.length<18 && /^(?:按压|按下|选择|松开)/.test(t)) return true;
+  return false;
+}
+function topicBonus(c, P){
+  if(!c||!P) return 0;
+  var q=P.qn||'', body=((c.ld||'')+' '+(c.t||''));
+  var b=0;
+  if(/绿系统|绿液压|黄系统|蓝系统|液压/.test(q)){
+    if(/绿液压|绿系统|HYD\s*G|黄液压|蓝液压|液压系统|液压泵|油箱/.test(body)) b+=0.42;
+    if(/液压/.test(body) && /系统|环路|作动|油箱/.test(body)) b+=0.12;
+  }
+  if(/不可靠|空速/.test(q)){
+    if(/空速不可靠|不可靠.*空速|空速指示不可靠|BUSS|备用速度刻度/.test(body)) b+=0.48;
+  }
+  if(isRefChunk(c) || isTocNoise(c.t||'')) b*=0.15;
+  return b;
+}
 
 /* 把一句话整理成可搜索的查询：去口头禅、纠错词表、术语同音纠错、备选识别结果、模糊补全 */
 function prepareQuery(db, raw, corr, alternatives){
-  var rawQ=cleanQuery(applyCorr(raw, corr));
-  var lc=lexCorrect(rawQ, db), q=lc.q, lexFixes=lc.fixes.slice();
+  var spoken=cleanQuery(applyCorr(raw, corr));
+  var hard=applyAsrHard(spoken), rawQ=hard.q;
+  var lc=lexCorrect(rawQ, db), q=lc.q, lexFixes=hard.fixes.concat(lc.fixes);
   var base=Array.from(new Set(tokenize(q)));
   var extra=new Set();
-  tokenize(rawQ).forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); });
+  tokenize(spoken).forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); });
   latinAlts(q).forEach(function(t){ extra.add(t); });
   (alternatives||[]).forEach(function(a){
-    var qa0=cleanQuery(applyCorr(a,corr));
+    var spokenA=cleanQuery(applyCorr(a,corr));
+    var ha=applyAsrHard(spokenA), qa0=ha.q; mergeLexFixes(lexFixes, ha.fixes);
     var lca=lexCorrect(qa0, db); mergeLexFixes(lexFixes, lca.fixes);
     tokenize(lca.q).forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); });
-    tokenize(qa0).forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); });
+    tokenize(spokenA).forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); });
     latinAlts(lca.q).forEach(function(t){ extra.add(t); });
   });
   var alts=new Map();
@@ -728,12 +856,12 @@ function prepareQuery(db, raw, corr, alternatives){
     });
     (f.near||[]).forEach(function(n){ tokenize(n).forEach(function(tt){ if(base.indexOf(tt)<0) extra.add(tt); }); });
   });
-  if(/不可靠空速/.test(q)) tokenize('空速不可靠').forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); });
-  if(/空速不可靠/.test(q)) tokenize('不可靠空速').forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); });
+  if(/不可靠空速|空速不可靠/.test(q)){ tokenize('空速不可靠').forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); }); tokenize('不可靠空速').forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); }); }
+  if(/绿系统|绿液压/.test(q)){ tokenize('绿液压系统').forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); }); tokenize('绿液压').forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); }); tokenize('绿系统').forEach(function(t){ if(base.indexOf(t)<0) extra.add(t); }); }
   fuzzyPairs(q, db).forEach(function(p){ addAlt(p[0],p[1]); });
-  fuzzyPairs(rawQ, db).forEach(function(p){ addAlt(p[0],p[1]); });
+  fuzzyPairs(spoken, db).forEach(function(p){ addAlt(p[0],p[1]); });
   var hl=new Set(base); extra.forEach(function(t){hl.add(t);}); alts.forEach(function(v){ v.forEach(function(t){hl.add(t);}); });
-  return {q:q, raw:rawQ, qn:q.toLowerCase().replace(/\s+/g,''), base:base, extra:Array.from(extra), alts:alts, hl:Array.from(hl), lexFixes:lexFixes};
+  return {q:q, raw:spoken, qn:q.toLowerCase().replace(/\s+/g,''), base:base, extra:Array.from(extra), alts:alts, hl:Array.from(hl), lexFixes:lexFixes};
 }
 /* 口语里多次停顿吐出的片段 → 合并成一个搜索意图（词并集），而不是每段各搜一次 */
 function mergePhrase(prev, next){
@@ -760,12 +888,14 @@ function prepareIntent(db, phrases, corr, altLists){
   var rawParts=[], parts=[], lexFixes=[], i;
   (phrases||[]).forEach(function(p){
     var c=cleanQuery(applyCorr(p||'', corr)).trim(); if(!c) return;
+    var hard=applyAsrHard(c); mergeLexFixes(lexFixes, hard.fixes); c=hard.q;
     rawParts.push(c);
     var lc=lexCorrect(c, db); mergeLexFixes(lexFixes, lc.fixes); parts.push(lc.q);
   });
   if(!parts.length) return prepareQuery(db, '', corr, []);
   var q=parts[0]; for(i=1;i<parts.length;i++) q=mergePhrase(q, parts[i]);
   var rawQ=rawParts[0]||''; for(i=1;i<rawParts.length;i++) rawQ=mergePhrase(rawQ, rawParts[i]);
+  var hardQ=applyAsrHard(q); mergeLexFixes(lexFixes, hardQ.fixes); q=hardQ.q;
   var lcQ=lexCorrect(q, db); mergeLexFixes(lexFixes, lcQ.fixes); q=lcQ.q;
   var base=[], seen={};
   parts.forEach(function(p){ tokenize(p).forEach(function(t){ if(!seen[t]){ seen[t]=1; base.push(t); } }); });
@@ -775,6 +905,7 @@ function prepareIntent(db, phrases, corr, altLists){
   (altLists||[]).forEach(function(list){
     (list||[]).forEach(function(a){
       var qa0=cleanQuery(applyCorr(a||'',corr)).trim(); if(!qa0) return;
+      var ha=applyAsrHard(qa0); qa0=ha.q; mergeLexFixes(lexFixes, ha.fixes);
       var lca=lexCorrect(qa0, db); mergeLexFixes(lexFixes, lca.fixes);
       tokenize(lca.q).forEach(function(t){ if(!seen[t]) extra.add(t); });
       tokenize(qa0).forEach(function(t){ if(!seen[t]) extra.add(t); });
@@ -820,12 +951,17 @@ function searchDB(db, P){
   function secCov(c){
     var k=secKeyOf(c), v=secCache.get(k);
     if(v===undefined){
-      var st=SI.m.get(k), sum=0;
+      var st=SI.m.get(k), sum=0, size=(SI.sz&&SI.sz.get(k))||1;
       for(var b=0;b<qt.length;b++){
         if(st.has(qt[b])) sum+=w[b];
         else { var al=altL[b]; for(var m=0;m<al.length;m++) if(st.has(al[m])){ sum+=0.7*w[b]; break; } }
       }
-      v=Math.min(1,sum/tot); secCache.set(k,v);
+      v=Math.min(1,sum/tot);
+      /* 缺 sec 时整章上万段共用一个桶，覆盖率会虚高——压掉 */
+      if(size>2000) v*=0.08;
+      else if(size>500) v*=0.22;
+      else if(size>150) v*=0.55;
+      secCache.set(k,v);
     }
     return v;
   }
@@ -840,8 +976,8 @@ function searchDB(db, P){
     }
     var bodyFlat=(c.t||'').toLowerCase().replace(/\s+/g,''), leadFlat=(c.ld||'').toLowerCase().replace(/\s+/g,'');
     var qnAlts=[P.qn];
-    if(P.qn==='不可靠空速') qnAlts.push('空速不可靠','空速指示不可靠');
-    if(P.qn==='空速不可靠') qnAlts.push('不可靠空速','空速指示不可靠');
+    if(/不可靠空速|空速不可靠/.test(P.qn||'')) qnAlts.push('空速不可靠','不可靠空速','空速指示不可靠');
+    if(/绿系统|绿液压/.test(P.qn||'')) qnAlts.push('绿液压系统','绿液压','绿系统');
     function hasQn(s){ for(var qi=0;qi<qnAlts.length;qi++) if(qnAlts[qi] && s.indexOf(qnAlts[qi])>=0) return true; return false; }
     var exactBody=!!P.qn && hasQn(bodyFlat);
     var exactLead=!exactBody && !!P.qn && hasQn(leadFlat);
@@ -852,16 +988,21 @@ function searchDB(db, P){
       if(qt.length<=2){ if(nh<qt.length) continue; }
       else if(ratio<0.3 && !(nh>=1 && sc>=0.75 && ratio>=0.15)) continue;
     }
-    /* 目录/规章表、仅引导语命中的短条：别盖过真正写了术语的正文 */
+    /* 目录/点线 TOC/规章表、仅引导语命中、拆坏章标题：别盖过真正写了术语的正文 */
     var thin=exactLead && !exactBody;
-    var pen=isRefChunk(c)?0.55:(c.k==='tb'?0.85:1);
+    var toc=isTocNoise(c.t||'')||isRefChunk(c);
+    var pen=toc?0.22:(c.k==='tb'?0.85:1);
     if(thin) pen*=0.5;
-    var bodyBonus=(c.k==='p'||c.k==='fl') && !thin ? 0.08 : 0;
-    var lenBonus=Math.min(0.12, Math.log(1+bodyFlat.replace(/[.\-_/]/g,'').length)/40);
-    var exactBonus=exactBody?1:(exactLead?0.25:(exactT?0.35:0));
-    res.push({c:c, s:pen*(ratio+exactBonus+0.35*sc)+bodyBonus+lenBonus});
+    if(isProcUiNoise(c,P)) pen*=0.28;
+    /* 点线目录即使字面命中整词，也不给满分 exact */
+    var exactBonus=exactBody?(toc?0.18:1):(exactLead?0.25:(exactT?0.35:0));
+    var bodyBonus=(c.k==='p'||c.k==='fl') && !thin && !toc ? 0.12 : 0;
+    var plainLen=bodyFlat.replace(/[.\-_/·…]/g,'').length;
+    var lenBonus=toc?0:Math.min(0.12, Math.log(1+plainLen)/40);
+    var shortPen=(plainLen>0 && plainLen<22 && !exactBody)?0.85:1;
+    res.push({c:c, s:shortPen*(pen*(ratio+exactBonus+0.35*sc)+bodyBonus+lenBonus+topicBonus(c,P))});
   }
-  res.sort(function(x,y){ return (y.s-x.s)||(x.c.t.length-y.c.t.length); });
+  res.sort(function(x,y){ return (y.s-x.s)||((y.c.t||'').replace(/[.\s]/g,'').length-(x.c.t||'').replace(/[.\s]/g,'').length); });
   return {hits:res, qt:P.hl, known:known, fixed:fixed};
 }
 
@@ -976,18 +1117,31 @@ function dropManual(key){
   DB=DB.filter(function(c){ return c.m!==name; }); delete MAN[key]; delete META[name];
   invalidateIndexes(); rebuildGroups(); manList();
 }
+/* 同名手册只留一本：拆分/载入会替换旧副本（术语表仍做并集，共享词保留） */
+async function dropOtherKeysForName(name, keepKey){
+  var keys=Object.keys(MAN), i, k;
+  for(i=0;i<keys.length;i++){
+    k=keys[i]; if(k===keepKey) continue; if(MAN[k]!==name) continue;
+    dropManual(k); await idbDel(k);
+  }
+}
 function manList(){
   var by={}; DB.forEach(function(c){ by[c.m]=(by[c.m]||0)+1; });
   var names=Object.keys(by);
-  $('dbInfo').innerHTML=names.length ? names.map(function(n){ var m=META[n]||{}; return '<div>'+esc(n)+'　<span class="muted">'+by[n]+' 条'+(m.built?' · 拆分于 '+esc(m.built):'')+'</span></div>'; }).join('') : '<span class="muted">还没有手册</span>';
+  var lexN=(LEX&&LEX.terms)?LEX.terms.length:((LEX_STORE&&LEX_STORE.termCount)||0);
+  var head=names.length ? names.map(function(n){ var m=META[n]||{}; return '<div>'+esc(n)+'　<span class="muted">'+by[n]+' 条'+(m.built?' · 拆分于 '+esc(m.built):'')+(m.src?' · '+esc(m.src):'')+'</span></div>'; }).join('') : '<span class="muted">还没有手册</span>';
+  $('dbInfo').innerHTML=head+(lexN?'<div class="muted" style="border:0;padding-top:8px">持久术语表 '+lexN+' 词（拆新手册只并入新词）</div>':'');
   refreshFeed();
 }
-async function ingest(key, text, sha){
+async function ingest(key, text, sha, src){
   var j=JSON.parse(text);
   if(!j||!j.chunks) throw new Error('格式不对');
-  var name=j.name||key.replace(/\.manual\.json$/i,'').replace(/\.json$/i,'');
-  await addManual(name, j.chunks, key, {built:j.built, pages:j.pages});
-  await idbPut(key,{sha:sha,text:text});
+  var name=j.name||key.replace(/\.manual\.json$/i,'').replace(/^local:/i,'').replace(/^byname:/i,'').replace(/\.json$/i,'');
+  await dropOtherKeysForName(name, key);
+  await addManual(name, j.chunks, key, {built:j.built, pages:j.pages, src:src||(key.indexOf('local:')===0||key.indexOf('byname:')===0?'本机拆分':'仓库')});
+  await idbPut(key,{sha:sha,text:text,name:name});
+  var lr=await mergeLexiconFromManual(name, j.chunks);
+  return {name:name, added:lr.added, terms:(LEX&&LEX.terms&&LEX.terms.length)||0};
 }
 
 /* ===== 找出仓库里有哪些手册 ===== */
@@ -1024,36 +1178,80 @@ async function checkUpdates(){
         setStatus('正在下载 '+f.name+'…');
         var r=await fetch('./'+encodeURIComponent(f.name),{cache:'no-cache'});
         if(!r.ok) throw new Error(r.status);
-        await ingest(f.name, await r.text(), f.sha); changed++;
+        await ingest(f.name, await r.text(), f.sha, '仓库'); changed++;
       }catch(e){ failed++; }
     }
     if(lst.auth){
       var names={}; lst.files.forEach(function(f){ names[f.name]=1; });
-      Object.keys(MAN).forEach(function(k){ if(k.indexOf('local:')!==0 && !names[k]){ dropManual(k); idbDel(k); } });
+      Object.keys(MAN).forEach(function(k){
+        if(k.indexOf('local:')===0 || k.indexOf('byname:')===0 || k===LEX_KEY) return;
+        if(!names[k]){ dropManual(k); idbDel(k); }
+      });
     }
-    var n=Object.keys(MAN).length;
-    setStatus(failed&&!changed ? ('下载失败，使用本机 '+n+' 册') : (n?(changed?('已更新 '+changed+' 本 · 共 '+n+' 册，可离线使用'):('已是最新 · 共 '+n+' 册，可离线使用')):'仓库里还没有 *.manual.json'));
+    var n=Object.keys(MAN).length, lexN=(LEX&&LEX.terms&&LEX.terms.length)||0;
+    setStatus(failed&&!changed ? ('下载失败，使用本机 '+n+' 册') : (n?(changed?('已更新 '+changed+' 本 · 共 '+n+' 册 · 术语 '+lexN+' 词'):('已是最新 · 共 '+n+' 册 · 术语 '+lexN+' 词')):'仓库里还没有 *.manual.json（可用「拆分」写入本机）'));
   }finally{ CHECKING=false; }
 }
 async function boot(){
   setStatus('正在载入本机手册…');
+  await loadLexStore();
   var all=await idbAll();
   for(var i=0;i<all.length;i++){
+    if(all[i].key===LEX_KEY) continue;
     try{ var j=JSON.parse(all[i].val.text); var key=all[i].key;
-      var name=j.name||key.replace(/\.manual\.json$/i,'').replace(/\.json$/i,'');
-      await addManual(name, j.chunks, key, {built:j.built, pages:j.pages}); }catch(e){}
+      var name=j.name||key.replace(/\.manual\.json$/i,'').replace(/^local:/i,'').replace(/^byname:/i,'').replace(/\.json$/i,'');
+      await addManual(name, j.chunks, key, {built:j.built, pages:j.pages, src:key.indexOf('local:')===0||key.indexOf('byname:')===0?'本机拆分':'仓库'});
+      /* 旧缓存若还没并入持久词表，补一次并集 */
+      if(!LEX_STORE.sources || !LEX_STORE.sources[name]) await mergeLexiconFromManual(name, j.chunks);
+    }catch(e){}
   }
-  if(DB.length){ setStatus('本机已有 '+Object.keys(MAN).length+' 册，可离线使用'); setTimeout(function(){ try{ buildFuzzy(DB); buildLexicon(DB); }catch(e){} },80); }
+  if(!LEX) materializeLex(LEX_STORE||emptyLexStore());
+  if(DB.length){ setStatus('本机已有 '+Object.keys(MAN).length+' 册 · 术语 '+(LEX.terms?LEX.terms.length:0)+' 词'); setTimeout(function(){ try{ buildFuzzy(DB); }catch(e){} },80); }
   checkUpdates();
 }
 $('chk').onclick=function(){ checkUpdates(); };
-$('clrCache').onclick=async function(){ await idbClear(); DB=[]; MAN={}; META={}; invalidateIndexes(); rebuildGroups(); manList(); setStatus('本机缓存已清除。点“检查更新”重新下载。'); };
+$('clrCache').onclick=async function(){
+  await idbClear(); DB=[]; MAN={}; META={}; LEX=null; LEX_STORE=emptyLexStore();
+  invalidateIndexes(); rebuildGroups(); manList();
+  setStatus('本机缓存与术语表已清除。点“检查更新”重新下载，或到「拆分」再拆。');
+};
 $('jsonFile').onchange=async function(){
-  var fs=Array.prototype.slice.call(this.files||[]), ok=0;
-  for(var i=0;i<fs.length;i++){ try{ await ingest('local:'+fs[i].name, await fs[i].text(), 'local'); ok++; }catch(e){} }
-  if(ok) setStatus('已载入 '+ok+' 个本地文件'); this.value='';
+  var fs=Array.prototype.slice.call(this.files||[]), ok=0, last=null;
+  for(var i=0;i<fs.length;i++){
+    try{
+      var text=await fs[i].text(), j=JSON.parse(text), name=j.name||fs[i].name.replace(/\.manual\.json$/i,'').replace(/\.json$/i,'');
+      last=await ingest('byname:'+name, text, 'local-file', '本机 JSON'); ok++;
+    }catch(e){}
+  }
+  if(ok) setStatus('已载入 '+ok+' 个本地文件'+(last?' · 术语 '+last.terms+' 词（+'+last.added+'）':'')); this.value='';
 };
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js').catch(function(){}); }
+
+function showAppTab(name){
+  var split=name==='split';
+  $('pSearch').hidden=split; $('pSplit').hidden=!split;
+  $('tabSearch').classList.toggle('on', !split); $('tabSplit').classList.toggle('on', split);
+  try{ history.replaceState(null,'', split?'#split':'#search'); }catch(e){}
+  if(split){ var fr=$('splitFrame'); if(fr && !fr.getAttribute('data-loaded')) fr.setAttribute('data-loaded','1'); }
+  else try{ $('q').focus(); }catch(e){}
+}
+$('tabSearch').onclick=function(){ showAppTab('search'); };
+$('tabSplit').onclick=function(){ showAppTab('split'); };
+if(/split/i.test(location.hash||'')) showAppTab('split');
+window.addEventListener('hashchange', function(){ showAppTab(/split/i.test(location.hash||'')?'split':'search'); });
+/* 拆分页（iframe）拆完后把 JSON 交给本页写入 IndexedDB + 并入术语表 */
+window.addEventListener('message', async function(ev){
+  var d=ev&&ev.data; if(!d || d.type!=='manuals-split-done' || !d.json) return;
+  try{
+    var j=typeof d.json==='string'?JSON.parse(d.json):d.json;
+    var name=j.name||'未命名手册';
+    var text=typeof d.json==='string'?d.json:JSON.stringify(j);
+    var r=await ingest('byname:'+name, text, 'split-'+Date.now(), '本机拆分');
+    setStatus('已写入本机：'+name+' · 术语 '+r.terms+' 词（+'+r.added+'）');
+    try{ buildFuzzy(DB); }catch(e){}
+    showAppTab('search');
+  }catch(e){ setStatus('拆分结果写入失败：'+(e&&e.message||e)); }
+});
 
 
 /* ===== 搜索显示：每个问题一块，最新的在最上面 ===== */
@@ -1087,6 +1285,7 @@ function gapMs(){ return parseInt($('gap').value,10)||4000; }
 /* 用累计短语合成的单一意图搜索；按整组覆盖了多少意图词排序，避免一词一章的散点 */
 function contentRank(c){
   if(!c) return -99;
+  if(isTocNoise(c.t||'')) return -4;
   if(isRefChunk(c)) return -2;
   if(c.k==='tb') return -1;
   if(c.k==='h') return 0;
@@ -1132,12 +1331,14 @@ function groupsOf(e){
   return {hits:hits.length, groups:groups, order:order, qt:r.qt, P:P, known:r.known, fixed:r.fixed};
 }
 function isWeakTitle(t){
-  t=(t||'').trim(); if(!t) return true;
+  t=(t||'').trim().replace(/^[\s\-—–:：·•]+/,''); if(!t) return true;
   if(/^[：:\-—–]/.test(t)) return true;
   if(/^\d{1,2}(?:\.\d+)*$/.test(t)) return true;
   if(t.length<=2) return true;
   if(/最远\s*\d+\s*NM/i.test(t)) return true;
+  /* 拆分页把某条操作说明误当成整章标题，粘到上万段上 */
   if(/^一名飞行员/.test(t)) return true;
+  if(/按压CLR|CLR按钮|第三次按压/.test(t)) return true;
   return false;
 }
 function snippetOf(c, n){
@@ -1238,7 +1439,7 @@ function entryEl(e){
 }
 function refreshFeed(){
   var f=$('feed'); f.textContent='';
-  if(!DB.length){ f.appendChild(el('div','empty-s','先在“拆分”里拆一本手册，或在下面“手册与设置”里载入之前导出的 JSON。')); return; }
+  if(!DB.length){ f.appendChild(el('div','empty-s','先点上方「拆分」拆一本手册（写入本机），或在「手册与设置」载入 JSON / 检查仓库更新。')); return; }
   if(!ENT.length){ f.appendChild(el('div','empty-s','输入问题，或点“开始聆听”，直接说话。')); return; }
   ENT.forEach(function(e){ f.appendChild(entryEl(e)); });
 }

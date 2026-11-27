@@ -102,9 +102,9 @@ select{min-height:44px;font:inherit;font-size:16px;border:2px solid var(--line);
 </style>
 </head>
 <body>
-<header class="top">
-  <div class="brand">手册拆分 · 试搜 <a href="./index.html" style="font-size:14px;font-weight:500;color:var(--barfg);opacity:.7;margin-left:10px">速查页</a></div>
-  <nav class="tabs">
+<header class="top" id="topBar">
+  <div class="brand">手册拆分 · 试搜 <a href="./index.html#search" style="font-size:14px;font-weight:500;color:var(--barfg);opacity:.7;margin-left:10px">速查页</a></div>
+  <nav class="tabs" id="topTabs">
     <button id="tabSplit" class="on" type="button">拆分</button>
     <button id="tabSearch" type="button">试搜 <span id="dbBadge"></span></button>
   </nav>
@@ -142,9 +142,9 @@ select{min-height:44px;font:inherit;font-size:16px;border:2px solid var(--line);
     <div id="sum" class="sum"></div>
     <div id="warns"></div>
     <div class="row">
-      <button id="dlBtn" class="btn primary" type="button">下载 JSON</button>
+      <button id="dlBtn" class="btn" type="button">下载 JSON（备份）</button>
       <button id="cpBtn" class="btn" type="button">复制 JSON</button>
-      <button id="toSearch" class="btn" type="button">去试搜</button>
+      <button id="toSearch" class="btn primary" type="button">写入本机并速查</button>
     </div>
     <details open><summary id="tocSum">章节目录</summary><ol id="toc" class="toc"></ol></details>
   </div>
@@ -670,15 +670,36 @@ function toast(msg){ var t=$('toast'); t.textContent=msg; t.hidden=false; clearT
 function tick(){ return new Promise(function(r){ setTimeout(r,0); }); }
 function kb(n){ return n>1048576 ? (n/1048576).toFixed(1)+' MB' : Math.max(1,Math.round(n/1024))+' KB'; }
 
+/* 嵌入速查页时只保留拆分；独立打开则跳到统一入口 */
+var EMBED=/(?:^|[?&])embed=1(?:&|$)/.test(location.search||'');
+if(!EMBED && window.top===window){ location.replace('./index.html#split'); }
+if(EMBED){
+  try{ document.documentElement.classList.add('embed'); }catch(e){}
+  var tb=$('topBar'); if(tb) tb.style.display='none';
+  var ps=$('pSearch'); if(ps) ps.hidden=true;
+  var sp=$('pSplit'); if(sp) sp.hidden=false;
+}
+function notifyParentSplit(){
+  if(!LAST||!LAST.json) return false;
+  if(window.parent && window.parent!==window){
+    try{ window.parent.postMessage({type:'manuals-split-done', json:LAST.json, name:LAST.name}, '*'); return true; }catch(e){}
+  }
+  return false;
+}
 /* 标签页 */
 function showTab(name){
+  if(EMBED){ name='split'; }
   $('pSplit').hidden = name!=='split'; $('pSearch').hidden = name!=='search';
-  $('tabSplit').classList.toggle('on', name==='split'); $('tabSearch').classList.toggle('on', name==='search');
-  if(name==='search') $('q').focus();
+  if($('tabSplit')) $('tabSplit').classList.toggle('on', name==='split');
+  if($('tabSearch')) $('tabSearch').classList.toggle('on', name==='search');
+  if(name==='search') try{ $('q').focus(); }catch(e){}
 }
-$('tabSplit').onclick=function(){ showTab('split'); };
-$('tabSearch').onclick=function(){ showTab('search'); };
-$('toSearch').onclick=function(){ showTab('search'); };
+if($('tabSplit')) $('tabSplit').onclick=function(){ showTab('split'); };
+if($('tabSearch')) $('tabSearch').onclick=function(){ showTab('search'); };
+$('toSearch').onclick=function(){
+  if(notifyParentSplit()) return;
+  showTab('search');
+};
 
 /* PDF 引擎：先找同目录下的本地文件，找不到再试网络 */
 async function loadPdfjs(){
@@ -746,7 +767,9 @@ $('goBtn').onclick=async function(){
     LAST={name:name, json:json, fname:name.replace(/[\\\/:*?"<>|]/g,'_')+'.manual.json'};
     addToDB(name, JSON.parse(json).chunks);
     showResult(r, json);
-    $('barFill').style.width='100%'; $('progTxt').textContent='完成';
+    $('barFill').style.width='100%';
+    $('progTxt').textContent=EMBED?'完成（点“写入本机并速查”或自动发送）':'完成';
+    if(EMBED){ setTimeout(function(){ notifyParentSplit(); }, 200); }
   }catch(e){
     $('progTxt').textContent='出错：'+(e&&e.message||e);
     $('barFill').style.width='0';
