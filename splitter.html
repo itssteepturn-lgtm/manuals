@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<title>手册拆分 · 试搜</title>
+<title>文档拆分 · 试搜</title>
 <style>
 :root{
   --bg:#F1F3F5; --panel:#FFFFFF; --fg:#16202B; --muted:#5B6773; --line:#D3D9DF;
@@ -103,7 +103,7 @@ select{min-height:44px;font:inherit;font-size:16px;border:2px solid var(--line);
 </head>
 <body>
 <header class="top" id="topBar">
-  <div class="brand">手册拆分 · 试搜 <a href="./index.html#search" style="font-size:14px;font-weight:500;color:var(--barfg);opacity:.7;margin-left:10px">速查页</a></div>
+  <div class="brand">文档拆分 · 试搜 <a href="./index.html#search" style="font-size:14px;font-weight:500;color:var(--barfg);opacity:.7;margin-left:10px">速查页</a></div>
   <nav class="tabs" id="topTabs">
     <button id="tabSplit" class="on" type="button">拆分</button>
     <button id="tabSearch" type="button">试搜 <span id="dbBadge"></span></button>
@@ -113,7 +113,8 @@ select{min-height:44px;font:inherit;font-size:16px;border:2px solid var(--line);
 <main>
 <!-- ============ 拆分 ============ -->
 <section id="pSplit">
-  <h2><span class="step">1</span>选一本手册（PDF）</h2>
+  <h2><span class="step">1</span>选一份 PDF</h2>
+  <p class="muted" style="margin:0 0 8px">手册、通告、通知、通函、其他文件都可以拆。</p>
   <div class="row">
     <label class="btn primary" for="pdfFile">选择文件</label>
     <input id="pdfFile" type="file" accept="application/pdf,.pdf" hidden>
@@ -121,7 +122,7 @@ select{min-height:44px;font:inherit;font-size:16px;border:2px solid var(--line);
   <div id="fileInfo" class="muted">还没选文件</div>
 
   <h2><span class="step">2</span>起个名字</h2>
-  <label class="field"><span>手册名称（搜索结果里显示这个名字）</span><input id="mName" type="text" placeholder="例如：A330 机组除冰运行指南"></label>
+  <label class="field"><span>文档名称（搜索结果里显示这个名字）</span><input id="mName" type="text" placeholder="例如：A330 机组除冰运行指南 / 运行通告 12/25"></label>
   <details class="adv"><summary>高级（一般不用管）</summary>
     <p class="muted">页眉、页脚、页码、水印默认自动识别并去掉。只有结果不对时，才需要在这里手动填。</p>
     <div class="two">
@@ -166,13 +167,13 @@ select{min-height:44px;font:inherit;font-size:16px;border:2px solid var(--line);
   <div class="feedbar"><span class="meta">最新的问题在最上面</span><button id="clearFeed" class="lnk" type="button">清空记录</button></div>
   <div id="feed"></div>
 
-  <details class="adv"><summary>手册与设置</summary>
-    <h2>已载入的手册</h2>
+  <details class="adv"><summary>文档与设置</summary>
+    <h2>已载入的文档</h2>
     <div id="dbInfo" class="muted">还没有</div>
     <div class="row">
       <label class="btn" for="jsonFile">载入 JSON</label>
       <input id="jsonFile" type="file" accept=".json,application/json" multiple hidden>
-      <button id="clearDb" class="btn" type="button">清空手册</button>
+      <button id="clearDb" class="btn" type="button">清空文档</button>
     </div>
     <h2>停顿多久开始搜</h2>
     <select id="pause"><option value="800">0.8 秒</option><option value="1000" selected>1 秒</option><option value="1500">1.5 秒</option></select>
@@ -950,7 +951,7 @@ function entryEl(e){
 }
 function refreshFeed(){
   var f=$('feed'); f.textContent='';
-  if(!DB.length){ f.appendChild(el('div','empty-s','先在“拆分”里拆一本手册，或在下面“手册与设置”里载入之前导出的 JSON。')); return; }
+  if(!DB.length){ f.appendChild(el('div','empty-s','先在“拆分”里拆一份 PDF（手册/通告/通知等），或在下面“文档与设置”里载入之前导出的 JSON。')); return; }
   if(!ENT.length){ f.appendChild(el('div','empty-s','输入问题，或点“开始聆听”，直接说话。')); return; }
   ENT.forEach(function(e){ f.appendChild(entryEl(e)); });
 }
