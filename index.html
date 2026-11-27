@@ -134,10 +134,9 @@ a{color:var(--fg)}
       <button id="clrCache" class="btn" type="button">清除本机缓存</button>
     </div>
     <p class="muted">手册第一次从仓库下载后存在本机，之后没网也能用；有网时每次打开会自动检查更新。拆分手册请去 <a href="./splitter.html">拆分页</a>。</p>
-    <h2>停顿多久开始搜</h2>
-    <select id="pause"><option value="800">0.8 秒</option><option value="1000" selected>1 秒</option><option value="1500">1.5 秒</option></select>
-    <h2>停顿多久算说完一个问题</h2>
-    <select id="gap"><option value="1500">1.5 秒</option><option value="2500" selected>2.5 秒</option><option value="4000">4 秒</option></select>
+    <h2>停顿多久合并关键词并搜索</h2>
+    <p class="muted">边说边听：停顿不够长时，关键词会攒在一起，合并成一次查询再找最相关的章节。</p>
+    <select id="gap"><option value="2500">2.5 秒</option><option value="4000" selected>4 秒</option><option value="6000">6 秒</option></select>
     <h2>纠错词表</h2>
     <p class="muted">总是听错的词，一行写一条：听成的词 = 正确的词。例如：伊卡姆 = ECAM</p>
     <textarea id="corr" spellcheck="false" autocapitalize="off" placeholder="伊卡姆 = ECAM"></textarea>
@@ -520,6 +519,50 @@ function prepareQuery(db, raw, corr, alternatives){
   var hl=new Set(base); extra.forEach(function(t){hl.add(t);}); alts.forEach(function(v){ v.forEach(function(t){hl.add(t);}); });
   return {q:q, qn:q.toLowerCase().replace(/\s+/g,''), base:base, extra:Array.from(extra), alts:alts, hl:Array.from(hl)};
 }
+/* 口语里多次停顿吐出的片段 → 合并成一个搜索意图（词并集），而不是每段各搜一次 */
+function mergePhrase(prev, next){
+  var a=(prev||'').trim(), b=(next||'').trim();
+  if(!b) return a; if(!a) return b;
+  if(a.indexOf(b)>=0) return a;
+  if(b.indexOf(a)>=0) return b;
+  /* 至少重叠 2 字才拼（单字重叠在中文里太容易误伤，如「液压」+「压力」） */
+  var max=Math.min(a.length,b.length), n;
+  for(n=max;n>=2;n--) if(a.slice(-n)===b.slice(0,n)) return a+b.slice(n);
+  return joinText(a,b);
+}
+function uniqPush(arr, x){ if(!x || arr.indexOf(x)>=0) return; arr.push(x); }
+function addPhrase(list, text){
+  text=(text||'').trim(); if(!text) return;
+  for(var i=0;i<list.length;i++){
+    if(list[i]===text) return;
+    if(list[i].indexOf(text)>=0) return;
+    if(text.indexOf(list[i])>=0){ list[i]=text; return; }
+  }
+  list.push(text);
+}
+function prepareIntent(db, phrases, corr, altLists){
+  var parts=[], i;
+  (phrases||[]).forEach(function(p){ var c=cleanQuery(applyCorr(p||'', corr)).trim(); if(c) parts.push(c); });
+  if(!parts.length) return prepareQuery(db, '', corr, []);
+  var q=parts[0]; for(i=1;i<parts.length;i++) q=mergePhrase(q, parts[i]);
+  var base=[], seen={};
+  parts.forEach(function(p){ tokenize(p).forEach(function(t){ if(!seen[t]){ seen[t]=1; base.push(t); } }); });
+  var extra=new Set();
+  parts.forEach(function(p){ latinAlts(p).forEach(function(t){ if(!seen[t]) extra.add(t); }); });
+  (altLists||[]).forEach(function(list){
+    (list||[]).forEach(function(a){
+      var qa=cleanQuery(applyCorr(a||'',corr)).trim(); if(!qa) return;
+      tokenize(qa).forEach(function(t){ if(!seen[t]) extra.add(t); });
+      latinAlts(qa).forEach(function(t){ if(!seen[t]) extra.add(t); });
+    });
+  });
+  var alts=new Map();
+  parts.forEach(function(p){
+    fuzzyPairs(p, db).forEach(function(pair){ var a=alts.get(pair[0]); if(!a){ a=[]; alts.set(pair[0],a); } if(a.indexOf(pair[1])<0) a.push(pair[1]); });
+  });
+  var hl=new Set(base); extra.forEach(function(t){hl.add(t);}); alts.forEach(function(v){ v.forEach(function(t){hl.add(t);}); });
+  return {q:q, qn:q.toLowerCase().replace(/\s+/g,''), base:base, extra:Array.from(extra), alts:alts, hl:Array.from(hl), phrases:parts};
+}
 function searchDB(db, P){
   var N=db.length, qt0=P.base;
   if(!qt0.length || !P.qn) return {hits:[],qt:P.hl||[],known:new Set(),fixed:new Map()};
@@ -797,15 +840,31 @@ function keyOf(c){
 function pageText(c){ return c.pl ? '页码 '+c.pl : '第 '+c.pg+' 页'; }
 function hms(d){ function z(n){return (n<10?'0':'')+n;} return z(d.getHours())+':'+z(d.getMinutes())+':'+z(d.getSeconds()); }
 
-function pauseMs(){ return parseInt($('pause').value,10)||1000; }
+function gapMs(){ return parseInt($('gap').value,10)||4000; }
+/* 用累计短语合成的单一意图搜索；按整组覆盖了多少意图词排序，避免一词一章的散点 */
 function groupsOf(e){
-  var P=prepareQuery(DB, e.q, CORR, e.alts||[]), r=searchDB(DB,P), hits=r.hits;
-  var groups=new Map(), order=[];
+  var phrases=(e.phrases&&e.phrases.length)?e.phrases:[e.q];
+  var altLists=(e.phraseAlts&&e.phraseAlts.length)?e.phraseAlts:(e.alts&&e.alts.length?[e.alts]:[]);
+  var P=prepareIntent(DB, phrases, CORR, altLists), r=searchDB(DB,P), hits=r.hits;
+  var groups=new Map(), order=[], covBoost=P.base.length?0.2/P.base.length:0;
   hits.forEach(function(h){
     var k=keyOf(h.c), g=groups.get(k);
-    if(!g){ g={first:h.c, hit:new Set()}; groups.set(k,g); order.push(k); }
+    if(!g){ g={first:h.c, hit:new Set(), best:h.s, coverMap:{}}; groups.set(k,g); order.push(k); }
+    else if(h.s>g.best){ g.best=h.s; g.first=h.c; }
     g.hit.add(h.c);
+    P.base.forEach(function(t){
+      if(g.coverMap[t]===1) return;
+      if(h.c._kb.has(t)||h.c._kt.has(t)){ g.coverMap[t]=1; return; }
+      var al=P.alts.get(t)||[];
+      for(var i=0;i<al.length;i++) if(h.c._kb.has(al[i])||h.c._kt.has(al[i])){ g.coverMap[t]=0.7; break; }
+    });
   });
+  order.forEach(function(k){
+    var g=groups.get(k), cover=0, t;
+    for(t in g.coverMap) if(Object.prototype.hasOwnProperty.call(g.coverMap,t)) cover+=g.coverMap[t];
+    g.cover=cover; g.score=g.best+covBoost*cover;
+  });
+  order.sort(function(a,b){ var ga=groups.get(a), gb=groups.get(b); return (gb.score-ga.score)||(gb.cover-ga.cover); });
   return {hits:hits.length, groups:groups, order:order, qt:r.qt, P:P, known:r.known, fixed:r.fixed};
 }
 function titleOf(c){ return LEVEL==='coarse'?(c.chT||''):(c.secT||c.chT||''); }
@@ -879,7 +938,7 @@ function updateEntry(e){
 }
 function newEntry(voice){
   ENT.forEach(function(x){ x.open=false; });
-  var e={id:++EID, q:'', alts:[], t:new Date(), open:true, voice:!!voice, keys:[], segs:{}, last:Date.now(), state:(voice?'hear':'done'), pt:null, lastG:null};
+  var e={id:++EID, q:'', alts:[], phrases:[], phraseAlts:[], t:new Date(), open:true, voice:!!voice, keys:[], segs:{}, last:Date.now(), state:(voice?'hear':'done'), pt:null, lastG:null};
   ENT.unshift(e); if(ENT.length>MAXE) ENT.length=MAXE;
   return e;
 }
@@ -912,9 +971,8 @@ try{ $('corr').value=localStorage.getItem('corr')||''; }catch(e){}
 $('corr').addEventListener('input', function(){ loadCorr(); refreshFeed(); });
 loadCorr();
 
-/* ===== 语音：持续聆听，每句话自动出结果 ===== */
+/* ===== 语音：持续聆听，关键词随说随攒，停顿后合并成一次意图搜索 ===== */
 var LISTEN=false, REC=null, SID=0, SEGMAP={}, WL=null, ENDS=[];
-function gapMs(){ return parseInt($('gap').value,10)||2500; }
 function micMsg(t){ $('micMsg').textContent=t||'\u00a0'; }
 function micSet(on){ $('mic').classList.toggle('rec',on); $('mic').textContent=on?'停止聆听':'开始聆听'; }
 async function lockScreen(on){
@@ -924,12 +982,54 @@ async function lockScreen(on){
   }catch(e){}
 }
 document.addEventListener('visibilitychange', function(){ if(document.visibilityState==='visible' && LISTEN) lockScreen(true); });
-function searchNow(e){ clearTimeout(e.pt); e.state='done'; if(ENT.indexOf(e)>=0) updateEntry(e); }
+function rebuildVoiceText(e){
+  e.q=e.keys.map(function(k){ return (e.segs[k]&&e.segs[k][0])||''; }).join('');
+  if(e.phrases&&e.phrases.length){
+    var live='';
+    e.keys.forEach(function(k){ if(e.finalKeys&&e.finalKeys[k]) return; live+=(e.segs[k]&&e.segs[k][0])||''; });
+    e.q=e.phrases.reduce(mergePhrase,'');
+    if(live) e.q=mergePhrase(e.q, live);
+  }
+  var a1=e.keys.map(function(k){ return e.segs[k][1]||e.segs[k][0]; }).join('');
+  var a2=e.keys.map(function(k){ return e.segs[k][2]||e.segs[k][0]; }).join('');
+  e.alts=[a1,a2].filter(function(x,idx,arr){ return x && x!==e.q && arr.indexOf(x)===idx; });
+}
+function commitFinals(e, sid, results, fromIdx){
+  if(!e.phrases) e.phrases=[];
+  if(!e.phraseAlts) e.phraseAlts=[];
+  if(!e.finalKeys) e.finalKeys={};
+  for(var i=fromIdx;i<results.length;i++){
+    var r=results[i]; if(!r.isFinal) continue;
+    var key=sid+':'+i; if(e.finalKeys[key]) continue;
+    var alts=e.segs[key]||[];
+    var text=(alts[0]||'').trim(); if(!text) continue;
+    e.finalKeys[key]=1;
+    addPhrase(e.phrases, text);
+    var altRow=[];
+    for(var k=1;k<alts.length;k++){ var t=(alts[k]||'').trim(); if(t&&t!==text) uniqPush(altRow,t); }
+    if(altRow.length) e.phraseAlts.push(altRow);
+  }
+}
+function searchNow(e){
+  clearTimeout(e.pt); e.pt=null; e.state='done';
+  if(e.phrases&&e.phrases.length) e.q=e.phrases.reduce(mergePhrase,'');
+  if(ENT.indexOf(e)>=0) updateEntry(e);
+}
+function scheduleIntentSearch(e){
+  e.state='hear'; clearTimeout(e.pt);
+  /* 等一段口语停顿：期间继续说话会重置计时，关键词一直往同一个意图里攒 */
+  e.pt=setTimeout(function(){ searchNow(e); }, gapMs());
+}
+function pickVoiceEntry(now){
+  /* 聆听会话里优先接着当前这条攒词；只有停顿超过 gap 且已出结果后，才开新问题 */
+  if(CUR && CUR.voice && ((now-CUR.last)<gapMs() || (LISTEN && CUR.state==='hear'))) return CUR;
+  return null;
+}
 function stopListen(msg){
   LISTEN=false; micSet(false); lockScreen(false);
   if(REC){ try{ REC.stop(); }catch(e){} }
   micMsg(msg||'');
-  ENT.forEach(function(x){ if(x.state==='hear'){ clearTimeout(x.pt); x.state='done'; } });
+  ENT.forEach(function(x){ if(x.state==='hear'){ clearTimeout(x.pt); searchNow(x); } });
   refreshFeed();
 }
 
@@ -938,7 +1038,7 @@ function startRec(){
   if(!SR){ stopListen('这个浏览器不支持语音识别。可以用键盘上的听写键代替。'); return; }
   var rec=new SR(), sid=++SID; REC=rec;
   rec.lang='zh-CN'; rec.continuous=true; rec.interimResults=true; rec.maxAlternatives=3;
-  rec.onstart=function(){ micMsg('聆听中…你说，我听；停顿一下就整体处理，接着说下一句就行。'); };
+  rec.onstart=function(){ micMsg('聆听中…随便说，关键词会攒在一起；停顿一会儿后按合并意图找最相关章节。'); };
   rec.onresult=function(ev){
     var now=Date.now(), created=false, touched=null;
     finalizeDraft();
@@ -946,7 +1046,8 @@ function startRec(){
       var r=ev.results[i], key=sid+':'+i, e=SEGMAP[key], alts=[];
       for(var k=0;k<r.length;k++) alts.push(r[k].transcript);
       if(!e){
-        if(CUR && CUR.voice && (now-CUR.last)<gapMs()) e=CUR; else { e=newEntry(true); created=true; }
+        e=pickVoiceEntry(now); if(!e){ e=newEntry(true); created=true; }
+        if(!e.finalKeys) e.finalKeys={};
         SEGMAP[key]=e; e.keys.push(key);
       }
       e.segs[key]=alts; e.last=now; CUR=e; touched=e;
@@ -954,13 +1055,12 @@ function startRec(){
     }
     if(!touched) return;
     var e2=touched, lastFinal=ev.results[ev.results.length-1].isFinal;
-    e2.q=e2.keys.map(function(k){ return e2.segs[k][0]; }).join('');
-    var a1=e2.keys.map(function(k){ return e2.segs[k][1]||e2.segs[k][0]; }).join(''), a2=e2.keys.map(function(k){ return e2.segs[k][2]||e2.segs[k][0]; }).join('');
-    e2.alts=[a1,a2].filter(function(x,idx,arr){ return x && x!==e2.q && arr.indexOf(x)===idx; });
-    /* 还在说：只显示文字，不搜。停顿一下（或引擎判定说完）才整体处理 */
-    e2.state='hear'; clearTimeout(e2.pt);
-    if(lastFinal) searchNow(e2); else e2.pt=setTimeout(function(){ searchNow(e2); }, pauseMs());
-    if(created){ refreshFeed(); keepTop(); } else if(!lastFinal) updateEntry(e2);
+    commitFinals(e2, sid, ev.results, ev.resultIndex);
+    rebuildVoiceText(e2);
+    /* 绝不在每个 final 词上立刻搜：只刷新字幕，停顿 gap 后再按合并意图搜一次 */
+    e2.state='hear';
+    if(lastFinal) scheduleIntentSearch(e2); else { clearTimeout(e2.pt); e2.pt=setTimeout(function(){ scheduleIntentSearch(e2); }, 400); }
+    if(created){ refreshFeed(); keepTop(); } else updateEntry(e2);
   };
   rec.onerror=function(ev){
     var m={'not-allowed':'麦克风被禁止。到 设置 > Safari > 麦克风 里允许，或是公司限制了。',
