@@ -143,7 +143,7 @@ a{color:var(--fg)}
       <input id="jsonFile" type="file" accept=".json,application/json" multiple hidden>
       <button id="clrCache" class="btn" type="button">清除本机缓存</button>
     </div>
-    <p class="muted">本机 IndexedDB 优先：拆分后直接写入本机并可离线速查；仓库里的 *.manual.json 作备份/分发，打开时检查更新。同名手册再拆会替换旧副本；术语表持久保存，只并入新词。</p>
+    <p class="muted">本机 IndexedDB 优先：拆分后直接写入本机并可离线速查。清除缓存或换设备后，术语表会丢，打开时从仓库 *.manual.json（或重新拆分）重建并继续并集累积。同名手册再拆会替换旧副本。聆听时只保留术语表命中的词。</p>
     <h2>停顿多久合并关键词并搜索</h2>
     <p class="muted">边说边听：停顿不够长时，关键词会攒在一起，合并成一次查询再找最相关的章节。</p>
     <select id="gap"><option value="2500">2.5 秒</option><option value="4000" selected>4 秒</option><option value="6000">6 秒</option></select>
@@ -785,6 +785,54 @@ function lexCorrect(q, db){
   return {q:out, fixes:fixes};
 }
 function mergeLexFixes(into, more){ (more||[]).forEach(function(f){ if(!f||!f.from||!f.to||f.from===f.to) return; for(var i=0;i<into.length;i++) if(into[i].from===f.from&&into[i].to===f.to) return; into.push(f); }); }
+function lexHasTerm(term){ return !!(LEX && LEX.df && term && LEX.df.has(term)); }
+/* 纠错后只保留术语表里有的片段；听写噪声（无命中）直接丢掉，不进搜索意图 */
+function extractLexHits(text, db){
+  ensureLex(db);
+  var hits=[], skipped=[], i=0;
+  text=text||'';
+  while(i<text.length){
+    var ch=text.charAt(i);
+    if(/[A-Za-z0-9]/.test(ch)){
+      var j=i; while(j<text.length && /[A-Za-z0-9]/.test(text.charAt(j))) j++;
+      var lat=text.slice(i,j);
+      if(lat.length>=2) hits.push(lat.toLowerCase());
+      else if(lat) skipped.push(lat);
+      i=j; continue;
+    }
+    if(!/[\u3400-\u9fff]/.test(ch)){ i++; continue; }
+    var k=i; while(k<text.length && /[\u3400-\u9fff]/.test(text.charAt(k))) k++;
+    var run=text.slice(i,k), pos=0, miss='';
+    while(pos<run.length){
+      var best=null, L, sub;
+      for(L=Math.min(8,run.length-pos);L>=2;L--){
+        sub=run.slice(pos,pos+L);
+        if(lexHasTerm(sub)){ best=sub; break; }
+      }
+      if(best){
+        if(miss){ skipped.push(miss); miss=''; }
+        hits.push(best); pos+=best.length;
+      } else { miss+=run.charAt(pos); pos++; }
+    }
+    if(miss) skipped.push(miss);
+    i=k;
+  }
+  return {hits:hits, skipped:skipped, q:hits.join('')};
+}
+/* 口语片段 → 硬纠错 + 同音纠错 + 只留术语命中；整段都没命中则 skipped */
+function lexIntentFragment(raw, db, corr){
+  var spoken=cleanQuery(applyCorr(raw||'', corr||[])).trim();
+  if(!spoken) return {q:'', raw:spoken, fixes:[], hits:[], skipped:[], keep:false};
+  var hard=applyAsrHard(spoken), fixes=hard.fixes.slice(), q=hard.q;
+  var lc=lexCorrect(q, db); mergeLexFixes(fixes, lc.fixes); q=lc.q;
+  var ex=extractLexHits(q, db);
+  /* 纠错主词一定收进命中；near 只作搜索扩展，不塞进意图短语 */
+  fixes.forEach(function(f){
+    if(f&&f.to&&lexHasTerm(f.to)&&ex.hits.indexOf(f.to)<0){ ex.hits.unshift(f.to); }
+  });
+  ex.q=ex.hits.join('');
+  return {q:ex.q, raw:spoken, fixes:fixes, hits:ex.hits, skipped:ex.skipped, keep:ex.hits.length>0};
+}
 /* 目录行、有效页清单、规章编号串、点线 TOC：不是飞行员要读的正文 */
 function isTocNoise(t){
   t=t||'';
@@ -885,42 +933,62 @@ function addPhrase(list, text){
   list.push(text);
 }
 function prepareIntent(db, phrases, corr, altLists){
-  var rawParts=[], parts=[], lexFixes=[], i;
+  var rawParts=[], parts=[], lexFixes=[], skippedAll=[], hitTerms=[], i;
+  ensureLex(db);
   (phrases||[]).forEach(function(p){
-    var c=cleanQuery(applyCorr(p||'', corr)).trim(); if(!c) return;
-    var hard=applyAsrHard(c); mergeLexFixes(lexFixes, hard.fixes); c=hard.q;
-    rawParts.push(c);
-    var lc=lexCorrect(c, db); mergeLexFixes(lexFixes, lc.fixes); parts.push(lc.q);
+    var frag=lexIntentFragment(p, db, corr);
+    if(frag.raw) rawParts.push(frag.raw);
+    mergeLexFixes(lexFixes, frag.fixes);
+    (frag.skipped||[]).forEach(function(s){ if(s&&skippedAll.indexOf(s)<0) skippedAll.push(s); });
+    if(!frag.keep) return; /* 无术语命中的口语片段：不进意图 */
+    parts.push(frag.q);
+    frag.hits.forEach(function(h){ if(h&&hitTerms.indexOf(h)<0) hitTerms.push(h); });
   });
-  if(!parts.length) return prepareQuery(db, '', corr, []);
-  var q=parts[0]; for(i=1;i<parts.length;i++) q=mergePhrase(q, parts[i]);
-  var rawQ=rawParts[0]||''; for(i=1;i<rawParts.length;i++) rawQ=mergePhrase(rawQ, rawParts[i]);
-  var hardQ=applyAsrHard(q); mergeLexFixes(lexFixes, hardQ.fixes); q=hardQ.q;
-  var lcQ=lexCorrect(q, db); mergeLexFixes(lexFixes, lcQ.fixes); q=lcQ.q;
-  var base=[], seen={};
-  parts.forEach(function(p){ tokenize(p).forEach(function(t){ if(!seen[t]){ seen[t]=1; base.push(t); } }); });
-  var extra=new Set();
-  rawParts.forEach(function(p){ tokenize(p).forEach(function(t){ if(!seen[t]) extra.add(t); }); });
-  parts.forEach(function(p){ latinAlts(p).forEach(function(t){ if(!seen[t]) extra.add(t); }); });
   (altLists||[]).forEach(function(list){
     (list||[]).forEach(function(a){
-      var qa0=cleanQuery(applyCorr(a||'',corr)).trim(); if(!qa0) return;
-      var ha=applyAsrHard(qa0); qa0=ha.q; mergeLexFixes(lexFixes, ha.fixes);
-      var lca=lexCorrect(qa0, db); mergeLexFixes(lexFixes, lca.fixes);
-      tokenize(lca.q).forEach(function(t){ if(!seen[t]) extra.add(t); });
-      tokenize(qa0).forEach(function(t){ if(!seen[t]) extra.add(t); });
-      latinAlts(lca.q).forEach(function(t){ if(!seen[t]) extra.add(t); });
+      var frag=lexIntentFragment(a, db, corr);
+      mergeLexFixes(lexFixes, frag.fixes);
+      if(!frag.keep) return;
+      frag.hits.forEach(function(h){ if(h&&hitTerms.indexOf(h)<0) hitTerms.push(h); });
     });
   });
+  if(!parts.length && !hitTerms.length){
+    var empty=prepareQuery(db, '', corr, []);
+    empty.skipped=skippedAll; empty.lexOnly=true;
+    return empty;
+  }
+  var q=parts.length?parts[0]:hitTerms.join('');
+  for(i=1;i<parts.length;i++) q=mergePhrase(q, parts[i]);
+  var rawQ=rawParts[0]||''; for(i=1;i<rawParts.length;i++) rawQ=mergePhrase(rawQ, rawParts[i]);
+  /* 意图词 = 术语命中的并集（再 tokenize），不把未命中 ASR 噪声塞进 base/extra */
+  var base=[], seen={};
+  hitTerms.forEach(function(h){ tokenize(h).forEach(function(t){ if(!seen[t]){ seen[t]=1; base.push(t); } }); });
+  parts.forEach(function(p){ tokenize(p).forEach(function(t){ if(!seen[t]){ seen[t]=1; base.push(t); } }); });
+  var extra=new Set();
   var alts=new Map();
-  function addAlt(from,to){ if(!from||!to||from===to) return; var a=alts.get(from); if(!a){ a=[]; alts.set(from,a); } if(a.indexOf(to)<0) a.push(to); }
-  lexFixes.forEach(function(f){ tokenize(f.from).forEach(function(ft){ tokenize(f.to).forEach(function(tt){ addAlt(ft,tt); }); (f.near||[]).forEach(function(n){ tokenize(n).forEach(function(tt){ addAlt(ft,tt); if(base.indexOf(tt)<0) extra.add(tt); }); }); }); (f.near||[]).forEach(function(n){ tokenize(n).forEach(function(tt){ if(base.indexOf(tt)<0) extra.add(tt); }); }); });
-  if(/不可靠空速/.test(q)) tokenize('空速不可靠').forEach(function(t){ if(base.indexOf(t)<0 && !seen[t]) extra.add(t); });
-  if(/空速不可靠/.test(q)) tokenize('不可靠空速').forEach(function(t){ if(base.indexOf(t)<0 && !seen[t]) extra.add(t); });
-  parts.forEach(function(p){ fuzzyPairs(p, db).forEach(function(pair){ addAlt(pair[0],pair[1]); }); });
-  rawParts.forEach(function(p){ fuzzyPairs(p, db).forEach(function(pair){ addAlt(pair[0],pair[1]); }); });
+  function addAlt(from,to){
+    if(!from||!to||from===to) return;
+    if(!lexHasTerm(to) && !/[a-z0-9]{2,}/i.test(to)) return; /* 模糊候选也必须落在术语表 */
+    var a=alts.get(from); if(!a){ a=[]; alts.set(from,a); } if(a.indexOf(to)<0) a.push(to);
+  }
+  lexFixes.forEach(function(f){
+    tokenize(f.from).forEach(function(ft){
+      tokenize(f.to).forEach(function(tt){ addAlt(ft,tt); });
+      (f.near||[]).forEach(function(n){ tokenize(n).forEach(function(tt){ addAlt(ft,tt); if(!seen[tt]){ extra.add(tt); } }); });
+    });
+    (f.near||[]).forEach(function(n){ if(lexHasTerm(n)&&!seen[n]) extra.add(n); tokenize(n).forEach(function(tt){ if(!seen[tt]) extra.add(tt); }); });
+  });
+  if(/不可靠空速/.test(q)||hitTerms.indexOf('不可靠空速')>=0) tokenize('空速不可靠').forEach(function(t){ if(!seen[t]) extra.add(t); });
+  if(/空速不可靠/.test(q)||hitTerms.indexOf('空速不可靠')>=0) tokenize('不可靠空速').forEach(function(t){ if(!seen[t]) extra.add(t); });
+  if(/绿系统|绿液压/.test(q)){ ['绿液压系统','绿液压','绿系统'].forEach(function(n){ if(lexHasTerm(n)) tokenize(n).forEach(function(t){ if(!seen[t]) extra.add(t); }); }); }
+  /* 模糊补全：只收能对上术语表的 */
+  parts.forEach(function(p){
+    fuzzyPairs(p, db).forEach(function(pair){
+      if(lexHasTerm(pair[1])) addAlt(pair[0], pair[1]);
+    });
+  });
   var hl=new Set(base); extra.forEach(function(t){hl.add(t);}); alts.forEach(function(v){ v.forEach(function(t){hl.add(t);}); });
-  return {q:q, raw:rawQ, qn:q.toLowerCase().replace(/\s+/g,''), base:base, extra:Array.from(extra), alts:alts, hl:Array.from(hl), phrases:parts, lexFixes:lexFixes};
+  return {q:q, raw:rawQ, qn:q.toLowerCase().replace(/\s+/g,''), base:base, extra:Array.from(extra), alts:alts, hl:Array.from(hl), phrases:parts, lexFixes:lexFixes, skipped:skippedAll, lexOnly:true, hitTerms:hitTerms};
 }
 function searchDB(db, P){
   var N=db.length, qt0=P.base;
@@ -1383,7 +1451,13 @@ function entryEl(e){
   var g;
   if(hear){ g=e.lastG; if(!g) return box; }
   else { g=groupsOf(e); e.lastG=g; at.textContent=hms(e.t)+(g.hits?' · '+g.hits+' 处':' · 没找到'); }
-  if(!g.hits){ if(!hear) box.appendChild(el('div','asum','没找到。换个说法，或少说几个字试试。')); return box; }
+  if(!g.hits){
+    if(!hear){
+      var why=(g.P&&g.P.skipped&&g.P.skipped.length)?'听到的词都不在术语表里，已跳过。再说专业词，或先拆/载入手册。':'没找到。换个说法，或少说几个字试试。';
+      box.appendChild(el('div','asum',why));
+    }
+    return box;
+  }
   if(!e.open){
     var c0=g.groups.get(g.order[0]).first;
     var sn=snippetOf(c0, 88);
@@ -1397,6 +1471,15 @@ function entryEl(e){
     var fx=el('div','kw'); fx.appendChild(el('b',null,'听写纠错'));
     g.P.lexFixes.slice(0,6).forEach(function(f){ fx.appendChild(el('i','fix',f.from+'→'+f.to)); });
     body.appendChild(fx);
+  }
+  if(g.P.skipped&&g.P.skipped.length){
+    var sk=el('div','kw'); sk.appendChild(el('b',null,'已跳过'));
+    g.P.skipped.slice(0,6).forEach(function(s){ sk.appendChild(el('i','fix',s)); });
+    body.appendChild(sk);
+  } else if(e.skippedPhrases&&e.skippedPhrases.length){
+    var sk2=el('div','kw'); sk2.appendChild(el('b',null,'已跳过'));
+    e.skippedPhrases.slice(0,6).forEach(function(s){ sk2.appendChild(el('i','fix',s)); });
+    body.appendChild(sk2);
   }
   var kws=keyTerms(g.P.q, g.known, g.fixed, g.P.lexFixes);
   if(kws.length){
@@ -1510,15 +1593,26 @@ function commitFinals(e, sid, results, fromIdx){
   if(!e.phrases) e.phrases=[];
   if(!e.phraseAlts) e.phraseAlts=[];
   if(!e.finalKeys) e.finalKeys={};
+  if(!e.skippedPhrases) e.skippedPhrases=[];
   for(var i=fromIdx;i<results.length;i++){
     var r=results[i]; if(!r.isFinal) continue;
     var key=sid+':'+i; if(e.finalKeys[key]) continue;
     var alts=e.segs[key]||[];
     var text=(alts[0]||'').trim(); if(!text) continue;
     e.finalKeys[key]=1;
-    addPhrase(e.phrases, text);
+    /* 只攒术语表能认出来的片段；听写噪声跳过 */
+    var frag=lexIntentFragment(text, DB, CORR);
+    if(!frag.keep){
+      if(e.skippedPhrases.indexOf(text)<0) e.skippedPhrases.push(text);
+      continue;
+    }
+    addPhrase(e.phrases, frag.q);
     var altRow=[];
-    for(var k=1;k<alts.length;k++){ var t=(alts[k]||'').trim(); if(t&&t!==text) uniqPush(altRow,t); }
+    for(var k=1;k<alts.length;k++){
+      var t=(alts[k]||'').trim(); if(!t||t===text) continue;
+      var fa=lexIntentFragment(t, DB, CORR);
+      if(fa.keep) uniqPush(altRow, fa.q);
+    }
     if(altRow.length) e.phraseAlts.push(altRow);
   }
 }
@@ -1550,7 +1644,7 @@ function startRec(){
   if(!SR){ stopListen('这个浏览器不支持语音识别。可以用键盘上的听写键代替。'); return; }
   var rec=new SR(), sid=++SID; REC=rec;
   rec.lang='zh-CN'; rec.continuous=true; rec.interimResults=true; rec.maxAlternatives=3;
-  rec.onstart=function(){ micMsg('聆听中…随便说，关键词会攒在一起；停顿一会儿后按合并意图找最相关章节。'); };
+  rec.onstart=function(){ micMsg('聆听中…只攒术语表能认出的词；听写噪声会跳过。停顿后按合并意图搜索。'); };
   rec.onresult=function(ev){
     var now=Date.now(), created=false, touched=null;
     finalizeDraft();
