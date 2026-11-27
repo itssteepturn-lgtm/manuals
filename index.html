@@ -634,7 +634,7 @@ function materializeLex(store){
   });
   terms.sort(function(a,b){ return b.length-a.length||((df.get(b)||0)-(df.get(a)||0)); });
   by0.forEach(function(arr){ arr.sort(function(a,b){ return b.length-a.length||((df.get(b)||0)-(df.get(a)||0)); }); });
-  LEX={terms:terms, by0:by0, df:df, n:terms.length, store:store};
+  LEX={terms:terms, by0:by0, df:df, titled:titled, termSet:new Set(terms), n:terms.length, store:store};
   return LEX;
 }
 function mergeExtractIntoStore(store, name, extracted){
@@ -707,19 +707,39 @@ function lexFarChars(q,t){
   for(i=0;i<n;i++) if(phoneDist(q.charAt(i),t.charAt(i))>0.7) far++;
   return far;
 }
+function lexTechTail(t){
+  if(!t) return '';
+  var m=String(t).match(TECH_TAIL);
+  return m?m[0]:'';
+}
 function lexMatchOk(cost, q, t){
   var L=Math.max(q.length,t.length), d=Math.abs(q.length-t.length); if(!L) return false;
   if(d>2) return false;
   /* 着陆重量≠可用推力：多数汉字音差大就直接拒，别靠「最大」词头放行 */
   var far=lexFarChars(q,t);
-  if(far>Math.max(1, Math.floor(L*0.34))) return false;
+  if(far>Math.max(1, Math.floor(L*0.28))) return false;
+  /* 专业后缀不同（重量 vs 推力）：除非几乎同音，否则绝不互改 */
+  var tq=lexTechTail(q), tt=lexTechTail(t);
+  if(tq && tt && tq!==tt && (far>1 || cost>0.22*L)) return false;
   var pref=lexSharePref(q,t), thr;
   /* 共享词头（不可…）时略放宽：听写常吞字/换字，如 不可厚重→不可靠空速 */
-  if(d===0) thr=(pref>=2?0.42:0.32)*L;
-  else if(d===1) thr=(pref>=2?0.48:0.28)*L;
-  else thr=(pref>=2?0.40:0.22)*L;
+  if(d===0) thr=(pref>=2?0.34:0.28)*L;
+  else if(d===1) thr=(pref>=2?0.40:0.24)*L;
+  else thr=(pref>=2?0.32:0.18)*L;
   if(q.charAt(0)!==t.charAt(0) && !isHomo(q.charAt(0),t.charAt(0))) thr*=0.75;
   return cost<=thr+1e-9;
+}
+/* 高置信同音纠错：只收明显听错；模棱两可直接放弃（勿把噪声当关键词） */
+function lexConfidentFix(from, to){
+  if(!from||!to||from===to) return false;
+  if(!lexHasTerm(to) || !lexStrongTerm(to)) return false;
+  var cost=alignCost(from,to), L=Math.max(from.length,to.length), far=lexFarChars(from,to);
+  if(!lexMatchOk(cost,from,to)) return false;
+  /* 有音差位时更严；纯同音近邻（着落→着陆）才放行 */
+  if(far>1) return false;
+  if(far>0 && cost>0.22*L) return false;
+  if(cost>0.30*L) return false;
+  return true;
 }
 function lexCandList(sub){
   if(!LEX) return [];
@@ -747,6 +767,17 @@ function lexIsTech(t){
   return t.indexOf('不可靠')>=0 && /空速|指示|速度|系统|程序|飞行/.test(t);
 }
 function lexSeeded(t){ return !!t && LEX_SEEDS.indexOf(t)>=0; }
+/* 活跃词表成员（过滤后的 terms）；勿用原始 df，以免弱词/噪声冒充命中 */
+function lexHasTerm(term){ return !!(LEX && LEX.termSet && term && LEX.termSet.has(term)); }
+/* 聆听意图只收「够格」术语：种子或专业后缀。拒绝标题叙事碎句、以及「最大/重量/天气」等弱词 */
+function lexStrongTerm(term){
+  if(!term || !lexHasTerm(term)) return false;
+  if(lexNoisyTerm(term)) return false;
+  if(lexSeeded(term)) return true;
+  if(term.length>=4 && lexIsTech(term)) return true;
+  if(term.length>=3 && lexIsTech(term) && (LEX.df.get(term)||0)>=8) return true;
+  return false;
+}
 function lexBetter(a, b, sub){
   if(!b) return a; if(!a) return b;
   var ta=lexIsTech(a.to), tb=lexIsTech(b.to);
@@ -775,54 +806,54 @@ function lexCorrect(q, db){
     var j=i; while(j<q.length && /[\u3400-\u9fff]/.test(q.charAt(j))) j++;
     var run=q.slice(i,j), pos=0, rebuilt='';
     while(pos<run.length){
-      var best=null, maxL=Math.min(8,run.length-pos), L, sub, cands, ci, t, cost;
+      var bestExact=null, bestFuzzy=null, maxL=Math.min(8,run.length-pos), L, sub, cands, ci, t, cost;
       for(L=maxL;L>=2;L--){
         sub=run.slice(pos,pos+L);
-        /* ASR 已是词表词（着陆重量等）：原样保留，绝不改写成别的术语 */
-        if(LEX.df.has(sub)){ best={from:sub,to:sub,cost:0,len:L}; break; }
+        /* ASR 已精确/子串命中够格术语：记下最长精确命中 */
+        if(lexStrongTerm(sub)){ bestExact={from:sub,to:sub,cost:0,len:L}; break; }
       }
-      if(!best){
-        /* 虚词后已有完整术语（的+最大着陆重量）：跳过虚词，勿整段糊改 */
-        var ch0=run.charAt(pos), ahead=false, a, La;
-        if(FILLER.test(ch0) || /[的了是在有与和]/.test(ch0)){
-          for(a=1;a<=2 && pos+a<run.length;a++){
-            for(La=Math.min(8,run.length-pos-a);La>=2;La--){
-              if(LEX.df.has(run.slice(pos+a,pos+a+La))){ ahead=true; break; }
-            }
-            if(ahead) break;
+      /* 虚词后已有完整术语（的+最大着陆重量）：跳过虚词，勿整段糊改 */
+      var ch0=run.charAt(pos), ahead=false, a, La;
+      if(!bestExact && (FILLER.test(ch0) || /[的了是在有与和]/.test(ch0))){
+        for(a=1;a<=2 && pos+a<run.length;a++){
+          for(La=Math.min(8,run.length-pos-a);La>=2;La--){
+            if(lexStrongTerm(run.slice(pos+a,pos+a+La))){ ahead=true; break; }
           }
-          if(ahead){ rebuilt+=ch0; pos++; continue; }
+          if(ahead) break;
         }
-        for(L=maxL;L>=3;L--){
-          sub=run.slice(pos,pos+L);
-          cands=lexCandList(sub);
-          for(ci=0;ci<cands.length;ci++){
-            t=cands[ci];
-            if(t===sub){ best={from:sub,to:t,cost:0,len:L}; break; }
-            if(t.length<sub.length && sub.indexOf(t)===0) continue;
-            if(!lexIsTech(t) && Math.abs(t.length-sub.length)>=1) continue;
-            cost=alignCost(sub,t);
-            if(!lexMatchOk(cost,sub,t)) continue;
-            if(cost<=0) continue;
-            /* 拒掉「共享词头但中段无关」的远距替换 */
-            if(lexFarChars(sub,t)>Math.max(1, Math.floor(Math.max(sub.length,t.length)*0.34))) continue;
-            best=lexBetter(best, {from:sub,to:t,cost:cost,len:L}, sub);
-          }
-          if(best && best.cost===0) break;
-          /* 整段已有高置信专业词命中就收下，避免再被更短碎词带走 */
-          if(best && best.len===L && lexIsTech(best.to) && best.cost<=0.40*Math.max(best.to.length,L)) break;
-        }
+        if(ahead){ rebuilt+=ch0; pos++; continue; }
       }
+      for(L=maxL;L>=3;L--){
+        /* 已有等长或更长的精确命中时，不再对同跨度做改写 */
+        if(bestExact && L<=bestExact.len) break;
+        sub=run.slice(pos,pos+L);
+        cands=lexCandList(sub);
+        for(ci=0;ci<cands.length;ci++){
+          t=cands[ci];
+          if(t===sub) continue;
+          if(t.length<sub.length && sub.indexOf(t)===0) continue;
+          if(!lexStrongTerm(t)) continue;
+          if(!lexIsTech(t) && Math.abs(t.length-sub.length)>=1) continue;
+          cost=alignCost(sub,t);
+          if(!lexConfidentFix(sub,t)) continue;
+          bestFuzzy=lexBetter(bestFuzzy, {from:sub,to:t,cost:cost,len:L}, sub);
+        }
+        if(bestFuzzy && bestFuzzy.len===L && bestFuzzy.cost<=0.30*Math.max(bestFuzzy.to.length,L)) break;
+      }
+      /* 更长的高置信纠错优先于短精确前缀（最大着陆+中量 → 最大着陆重量） */
+      var best=null;
+      if(bestFuzzy && (!bestExact || bestFuzzy.len>bestExact.len)) best=bestFuzzy;
+      else if(bestExact) best=bestExact;
+      else best=bestFuzzy;
       if(best && best.to!==best.from){
         var near=[];
-        /* 把代价接近的其它专业词也带去搜索，避免只押一个错的 */
         for(L=maxL;L>=3;L--){
           sub=run.slice(pos,pos+L); if(L!==best.len) continue;
           cands=lexCandList(sub);
           for(ci=0;ci<cands.length;ci++){
-            t=cands[ci]; if(t===best.to||!lexIsTech(t)) continue;
-            cost=alignCost(sub,t); if(!lexMatchOk(cost,sub,t)) continue;
-            if(cost<=best.cost+1.25 && (lexSeeded(t)||(/空速|液压|重量/.test(t) && t.length>=4))) near.push(t);
+            t=cands[ci]; if(t===best.to||!lexStrongTerm(t)) continue;
+            cost=alignCost(sub,t); if(!lexConfidentFix(sub,t)) continue;
+            if(cost<=best.cost+0.8 && (lexSeeded(t)||(/空速|液压|重量/.test(t) && t.length>=4))) near.push(t);
           }
         }
         if(best.to==='不可靠空速') near.unshift('空速不可靠');
@@ -837,8 +868,7 @@ function lexCorrect(q, db){
   return {q:out, fixes:fixes};
 }
 function mergeLexFixes(into, more){ (more||[]).forEach(function(f){ if(!f||!f.from||!f.to||f.from===f.to) return; for(var i=0;i<into.length;i++) if(into[i].from===f.from&&into[i].to===f.to) return; into.push(f); }); }
-function lexHasTerm(term){ return !!(LEX && LEX.df && term && LEX.df.has(term)); }
-/* 只保留术语表里有的片段；听写噪声（无命中）直接丢掉，不进搜索意图 */
+/* 只保留够格中文术语子串；听写噪声（无命中）直接丢掉，不进搜索意图 */
 function extractLexHits(text, db){
   ensureLex(db);
   var hits=[], skipped=[], i=0;
@@ -861,7 +891,8 @@ function extractLexHits(text, db){
       var best=null, L, sub;
       for(L=Math.min(8,run.length-pos);L>=2;L--){
         sub=run.slice(pos,pos+L);
-        if(lexHasTerm(sub)){ best=sub; break; }
+        /* 精确或连续子串命中够格术语才收；碎词（最大/重量）不配单独当意图 */
+        if(lexStrongTerm(sub)){ best=sub; break; }
       }
       if(best){
         if(miss){ skipped.push(miss); miss=''; }
@@ -873,43 +904,66 @@ function extractLexHits(text, db){
   }
   return {hits:hits, skipped:skipped, q:hits.join('')};
 }
-/* 口语片段：硬纠错后优先收 ASR 已命中术语；未命中碎片才保守同音纠错；绝不整句改写成无关词 */
+/* 口语片段：ASR 已精确/子串命中 → 原样保留；否则仅高置信同音纠错；没把握整段跳过 */
 function lexIntentFragment(raw, db, corr){
   var spoken=cleanQuery(applyCorr(raw||'', corr||[])).trim();
   if(!spoken) return {q:'', raw:spoken, fixes:[], hits:[], skipped:[], keep:false};
   var hard=applyAsrHard(spoken), fixes=hard.fixes.slice(), q=hard.q;
-  var exact=extractLexHits(q, db);
-  var hits=exact.hits.slice(), skipped=[];
+  var hits=[], skipped=[];
   function absorbFix(f){
-    if(!f||!f.to||!lexHasTerm(f.to)) return false;
+    if(!f||!f.to||!lexStrongTerm(f.to)) return false;
     if(f.from===f.to) return false;
-    if(!lexMatchOk(alignCost(f.from,f.to), f.from, f.to)) return false;
+    if(!lexConfidentFix(f.from, f.to)) return false;
     mergeLexFixes(fixes, [f]);
     if(hits.indexOf(f.to)<0) hits.push(f.to);
     return true;
   }
-  /* 已有着陆重量等原词命中：保留；只对未命中碎片做纠错，避免推力顶替重量 */
-  (exact.skipped||[]).forEach(function(sk){
-    if(!sk) return;
-    if(sk.length<3){ skipped.push(sk); return; }
-    var lc=lexCorrect(sk, db), got=false;
-    (lc.fixes||[]).forEach(function(f){ if(absorbFix(f)) got=true; });
-    var rest=extractLexHits(lc.q, db);
-    rest.hits.forEach(function(h){ if(hits.indexOf(h)<0){ hits.push(h); got=true; } });
-    if(!got) skipped.push(sk);
-    else (rest.skipped||[]).forEach(function(s){ if(s) skipped.push(s); });
-  });
-  /* 整段都无精确命中时，才对全句做一次保守纠错 */
-  if(!hits.length){
-    var lcAll=lexCorrect(q, db);
-    (lcAll.fixes||[]).forEach(function(f){ absorbFix(f); });
-    var exAll=extractLexHits(lcAll.q, db);
-    exAll.hits.forEach(function(h){ if(hits.indexOf(h)<0) hits.push(h); });
-    if(!hits.length) skipped=exAll.skipped.slice();
+  function takeExact(ex){
+    (ex.hits||[]).forEach(function(h){ if(h&&hits.indexOf(h)<0) hits.push(h); });
+  }
+  function scrapMeaningful(sk){
+    return !!(sk && sk.length>=2 && /[\u3400-\u9fff]/.test(sk) && !/^[的了是在有与和]+$/.test(sk));
+  }
+  /* 按中文/非中文段处理：完整命中则保留；有缺口时优先整段高置信纠错，避免「最大着陆」+「中量」半截 */
+  ensureLex(db);
+  var i=0;
+  while(i<q.length){
+    var ch=q.charAt(i);
+    if(/[A-Za-z0-9]/.test(ch)){
+      var j=i; while(j<q.length && /[A-Za-z0-9]/.test(q.charAt(j))) j++;
+      var lat=q.slice(i,j);
+      if(/^\d{2,}$/.test(lat)){ if(hits.indexOf(lat)<0) hits.push(lat); }
+      else if(lat) skipped.push(lat);
+      i=j; continue;
+    }
+    if(!/[\u3400-\u9fff]/.test(ch)){ i++; continue; }
+    var k=i; while(k<q.length && /[\u3400-\u9fff]/.test(q.charAt(k))) k++;
+    var run=q.slice(i,k), ex=extractLexHits(run, db), used=false;
+    var hasGap=(ex.skipped||[]).some(scrapMeaningful);
+    if(ex.hits.length && !hasGap){
+      takeExact(ex); used=true;
+    } else {
+      var lc=lexCorrect(run, db), got=false;
+      (lc.fixes||[]).forEach(function(f){ if(absorbFix(f)) got=true; });
+      if(got){
+        var rest=extractLexHits(lc.q, db);
+        takeExact(rest);
+        (rest.skipped||[]).forEach(function(s){ if(s) skipped.push(s); });
+        used=true;
+      } else if(ex.hits.length){
+        /* 纠错没把握：仍保留已精确命中的够格术语，缺口跳过 */
+        takeExact(ex);
+        (ex.skipped||[]).forEach(function(s){ if(s) skipped.push(s); });
+        used=true;
+      } else {
+        skipped.push(run);
+      }
+    }
+    i=k;
   }
   /* 硬纠错主词一定收进命中；near 只作搜索扩展，不塞进意图短语 */
   fixes.forEach(function(f){
-    if(f&&f.to&&lexHasTerm(f.to)&&hits.indexOf(f.to)<0) hits.unshift(f.to);
+    if(f&&f.to&&lexStrongTerm(f.to)&&hits.indexOf(f.to)<0) hits.unshift(f.to);
   });
   return {q:hits.join(''), raw:spoken, fixes:fixes, hits:hits, skipped:skipped, keep:hits.length>0};
 }
